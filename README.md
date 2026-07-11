@@ -66,11 +66,13 @@ Use these after installing the harness from this repo into the target repository
 and filling the obvious stack-specific placeholders. They are starting prompts;
 the real contract lives in `CLAUDE.md`, `migration/PLAN.md`, and the matrix.
 
-> **Prefer to tick boxes?** Open [`prompt-generator.html`](prompt-generator.html)
-> in a browser: pick freeze-and-replace / in-place / feature, fill your stack, and
-> it assembles the matching prompt below (blank fields stay `<placeholder>`). It
-> generates a prompt to paste, not harness code — the copy-in template stays the
-> source of truth.
+> **Prefer to tick boxes?** Use the hosted generator at
+> **[miro77.github.io/prompt-generator.html](https://miro77.github.io/prompt-generator.html)**,
+> or open [`prompt-generator.html`](prompt-generator.html) locally — same page.
+> Pick freeze-and-replace / in-place / feature, fill your stack, and it assembles
+> the matching prompt below (blank fields stay `<placeholder>`). It generates a
+> prompt to paste, not harness code — the copy-in template stays the source of
+> truth.
 
 ### 1. Freeze-and-replace migration
 
