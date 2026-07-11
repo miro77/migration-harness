@@ -132,6 +132,13 @@
   }
   .field input::placeholder { color: var(--faint); }
   .field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .field textarea {
+    font-family: var(--mono); font-size: .9rem; color: var(--ink);
+    background: var(--field); border: 1px solid var(--border); border-radius: 7px;
+    padding: .55rem .7rem; width: 100%; min-height: 7.5rem; resize: vertical; line-height: 1.5;
+  }
+  .field textarea::placeholder { color: var(--faint); }
+  .field textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
   .field .hint { font-size: .76rem; color: var(--faint); }
   .field .hint code { font-family: var(--mono); color: var(--muted); }
 
@@ -268,6 +275,16 @@
         </div>
       </div>
 
+      <div class="field" style="margin-top:1.4rem">
+        <label for="notes">Details &amp; constraints <span style="text-transform:none;color:var(--faint)">(optional, all profiles)</span></label>
+        <textarea id="notes" placeholder="3–10 lines of prose: what the user can do afterwards, edge behaviors you care about, explicit non-goals, or a pointer to a spec file in the repo.
+
+e.g. must handle 100k rows without blocking the UI;
+respects the active filter; RFC 4180 quoting; no XLSX, no scheduling.
+Full spec: migration/SPEC.md"></textarea>
+        <span class="hint">Appended to the prompt as operator notes — the feature profile breaks them into spec-matrix rows during Phase&nbsp;0. Anything you don't state here gets discovered or assumed (and recorded in <code>decisions.md</code>).</span>
+      </div>
+
       <details class="adv">
         <summary class="panel-title">Advanced — defaults are fine</summary>
         <label class="mode">
@@ -387,6 +404,11 @@
   // Render into <pre>, highlighting any remaining <...> placeholders.
   function render() {
     var text = templates[currentMode()]();
+    var notes = document.getElementById("notes").value.trim();
+    if (notes) {
+      text += "\n\nOperator notes — treat these as part of the goal (constraints, edge\n" +
+        "behaviors, non-goals; break them into matrix rows during Phase 0):\n" + notes;
+    }
     if (document.getElementById("model-split").checked) text += MODEL_SPLIT;
     out.textContent = "";
     var re = /<[^>\n]+>/g, last = 0, m;
