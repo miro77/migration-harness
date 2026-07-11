@@ -1,0 +1,21 @@
+name: harness-selftest
+
+# The enforcement harness's entire value is that it can't be silently bypassed.
+# A regression in a hook or tool is invisible without this, so run the bundled
+# regression guard (bash + git only) on every push and PR.
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # run-all.sh covers syntax (bash -n), shellcheck -S error (present on the
+      # runner), the runtime selftest, static consistency, and the e2e smoke
+      # test. -S error only: the hooks intentionally use unquoted word splitting
+      # (e.g. $HARNESS_FROZEN), so warning-level lint would be noise.
+      - name: Run all harness tests
+        run: bash template/test/run-all.sh
