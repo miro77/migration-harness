@@ -56,7 +56,21 @@ for key in command file_path pattern query description prompt filePath; do
   [ -n "$arg" ] && break
 done
 
-fingerprint="${tool_name}::${arg:0:80}"
+# Content-bearing edit tools would otherwise fingerprint as just
+# "Edit::<file_path>": a series of DIFFERENT edits to one file (a doc-heavy
+# phase) then reads as a loop and sprays false nudges (observed in the
+# field). Fold in a slice of the change content so only genuinely identical
+# edits count as repeats.
+sig=""
+case "$tool_name" in
+  Edit|Write|NotebookEdit|MultiEdit)
+    for key in old_string new_string content new_source; do
+      v=$(printf '%s' "$input" | tr '\n\r' '  ' \
+        | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\(\(\\.\|[^"\\]\)*\)".*/\1/p')
+      [ -n "$v" ] && sig="${sig}${v:0:40}"
+    done ;;
+esac
+fingerprint="${tool_name}::${arg:0:80}::${sig:0:80}"
 
 # --- 1. Observability: structured JSON log ---
 # Rotate at ~5 MB (one .1 generation): nothing else ever truncates this file,

@@ -42,8 +42,20 @@ trap 'rm -f "$tmp_index"' EXIT
 # would make git error out on the ignored path ("paths are ignored... use -f"),
 # failing the gate. So add the exclude only when .harness isn't already ignored.
 if [ "${#PATHS[@]}" -gt 0 ]; then
-  add=(-A -- "${PATHS[@]}")
-  git check-ignore -q .harness 2>/dev/null || add+=(':(exclude).harness')
-  GIT_INDEX_FILE="$tmp_index" git add "${add[@]}"
+  excl=()
+  git check-ignore -q .harness 2>/dev/null || excl=(':(exclude).harness')
+  # Stage entry by entry so a refusal NAMES the offending scope entry. The
+  # classic trap: an entry inside a gitignored directory (e.g. a committed
+  # tools dir shadowed by a generic '**/build' pattern) makes `git add`
+  # refuse the pathspec ("paths are ignored... use -f"), which otherwise
+  # surfaces only as "no hash" and a closed Stop hook.
+  for p in "${PATHS[@]}"; do
+    if ! GIT_INDEX_FILE="$tmp_index" git add -A -- "$p" "${excl[@]}" 2>/dev/null; then
+      echo "working-tree-hash: HARNESS_SCOPE entry '$p' cannot be staged for hashing" >&2
+      echo "  (most likely it is inside a gitignored directory - re-include it in" >&2
+      echo "  .gitignore, e.g. '!/$p/', or remove it from HARNESS_SCOPE)" >&2
+      exit 1
+    fi
+  done
 fi
 GIT_INDEX_FILE="$tmp_index" git write-tree

@@ -136,6 +136,7 @@ fail "unconfigured gates (this failure is intentional until you edit gates.sh)"
 bash migration/tools/check-stubs.sh >&2 \
   || fail "unregistered runtime stub(s) — see above (register in migration/integration-ledger.md, or wire the feature so the stub is gone)"
 
-bash migration/tools/record-gates.sh
+bash migration/tools/record-gates.sh \
+  || fail "all gates PASSED but the proof could NOT be recorded (working-tree-hash refused; likely a HARNESS_SCOPE entry it cannot stage - see the error above). The Stop hook will hold turns until this is fixed."
 rm -f "$_failfile"
 echo "GATES PASSED - proof recorded in .harness/state/gates-passed.diffsha"

@@ -531,6 +531,76 @@ chk "guard: exec locked gates.sh allowed"         "$(GUARD 'bash migration/tools
 chk "guard: read locked gates.sh allowed"         "$(GUARD 'cat migration/tools/gates.sh')" 0
 chk "guard: exec gates.sh redirect elsewhere allowed" "$(GUARD 'bash migration/tools/gates.sh > /tmp/g.log')" 0
 chk "guard: gates.sh piped to tee elsewhere allowed"  "$(GUARD 'bash migration/tools/gates.sh 2>&1 | tee /tmp/g.log')" 0
+
+# --- blanket staging guard (message masking, no quote-strip bypass) ---
+# JGUARD feeds raw JSON so payloads can contain escaped double quotes.
+JGUARD(){ printf '%s' "$1" | bash .claude/hooks/pretooluse-command-guard.sh >/dev/null 2>&1; echo $?; }
+chk "guard: git add -A blocks"                    "$(GUARD 'git add -A')" 2
+chk "guard: git add . blocks"                     "$(GUARD 'git add .')" 2
+chk "guard: git add -u blocks"                    "$(GUARD 'git add -u')" 2
+chk "guard: git add --update blocks"              "$(GUARD 'git add --update')" 2
+chk "guard: git commit -am blocks"                "$(GUARD 'git commit -am x')" 2
+chk "guard: git commit -a -m blocks"              "$(GUARD 'git commit -a -m x')" 2
+chk "guard: git commit --all blocks"              "$(GUARD 'git commit --all -m x')" 2
+chk "guard: explicit-path git add allowed"        "$(GUARD 'git add src/a.txt CLAUDE.md')" 0
+chk "guard: git status allowed"                   "$(GUARD 'git status')" 0
+chk "guard: commit -F message file allowed"       "$(GUARD 'git commit -F /tmp/msg.txt')" 0
+# message text mentioning staging flags must NOT block (false-positive lesson)
+chk "guard: message text 'add -A docs' allowed"   "$(JGUARD '{"tool_input":{"command":"git commit -m \"add -A docs\""}}')" 0
+chk "guard: message text 'use -a flag' allowed"   "$(JGUARD '{"tool_input":{"command":"git commit -m \"use -a flag\""}}')" 0
+chk "guard: single-quoted message allowed"        "$(JGUARD "{\"tool_input\":{\"command\":\"git commit -m 'add -A quoted'\"}}")" 0
+# quote-strip bypass regression: stray quotes around a REAL flag must still
+# block (a global quote-stripper would delete the -a between them)
+chk "guard: stray quotes around real -a still block" "$(JGUARD '{"tool_input":{"command":"git commit \" -a \" -m msg"}}')" 2
+chk "guard: real -a after a message still blocks"    "$(JGUARD '{"tool_input":{"command":"git commit -m \"x\" -a"}}')" 2
+cd /; rm -rf "$R"
+
+# ============================================================ hash: gitignored scope entry
+# A HARNESS_SCOPE entry inside a gitignored directory must fail closed WITH
+# the entry named — not silently produce no hash (field incident: a committed
+# tools dir shadowed by a generic '**/build' ignore pattern).
+R="$(mkrepo 'src tools_dir migration .claude CLAUDE.md')"; cd "$R"
+mkdir -p tools_dir; printf 'tool\n' > tools_dir/t.txt
+git add tools_dir; git commit -qm tools >/dev/null
+printf 'tools_dir\n' > .gitignore
+git add .gitignore; git commit -qm ignore >/dev/null
+herr="$(bash migration/tools/working-tree-hash.sh 2>&1 >/dev/null)"; hrc=$?
+chk "hash: gitignored scope entry fails closed" "$hrc" 1
+case "$herr" in *tools_dir*) ok "hash: failure names the offending entry";;
+  *) no "hash: failure names the offending entry" "$herr" "*tools_dir*";; esac
+cd /; rm -rf "$R"
+
+# ============================================================ frozen: out-of-repo paths
+# Fragment matching must not block same-shaped paths in OTHER repos (field
+# incident: editing a template copy of the harness elsewhere on disk was
+# blocked because its absolute path contains '.claude/hooks/').
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+chk "frozen: out-of-repo .claude/hooks path allowed" "$(FROZEN '/somewhere/else/template/.claude/hooks/x.sh')" 0
+chk "frozen: out-of-repo legacy-fragment path allowed" "$(FROZEN '/other/repo/legacy/src/A.java')" 0
+chk "frozen: in-repo absolute locked path still blocks" "$(FROZEN "$R/.claude/hooks/stop-require-gates.sh")" 2
+chk "frozen: in-repo relative locked path still blocks" "$(FROZEN '.claude/hooks/stop-require-gates.sh')" 2
+cd /; rm -rf "$R"
+
+# ============================================================ telemetry: loop fingerprints
+# Different edits to the SAME file must not read as a loop; identical edits must.
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+printf 'HARNESS_LOOP_THRESHOLD="3"\nHARNESS_LOOP_WINDOW="6"\n' >> migration/harness.env
+rm -f .harness/state/tool-stats/fingerprints
+out=""
+for i in 1 2 3; do
+  out="$(printf '{"tool_name":"Edit","tool_input":{"file_path":"src/a.txt","old_string":"version %s","new_string":"version %s"}}' "$i" "$((i+1))" \
+    | bash .claude/hooks/posttooluse-telemetry.sh 2>/dev/null)"
+done
+case "$out" in *Loop*detected*) no "telemetry: distinct edits to one file do NOT fire loop" "loop fired" "no loop";;
+  *) ok "telemetry: distinct edits to one file do NOT fire loop";; esac
+rm -f .harness/state/tool-stats/fingerprints
+out=""
+for i in 1 2 3; do
+  out="$(printf '{"tool_name":"Edit","tool_input":{"file_path":"src/a.txt","old_string":"same","new_string":"same2"}}' \
+    | bash .claude/hooks/posttooluse-telemetry.sh 2>/dev/null)"
+done
+case "$out" in *Loop*detected*) ok "telemetry: identical edits still fire loop";;
+  *) no "telemetry: identical edits still fire loop" "$out" "Loop detected";; esac
 cd /; rm -rf "$R"
 
 # ============================================================ doctor (read-only report)

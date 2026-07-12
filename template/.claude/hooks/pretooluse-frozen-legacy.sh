@@ -17,6 +17,15 @@ fp=$(printf '%s' "$input" | tr '\n\r' '  ' \
 # normalize JSON-escaped backslashes to single forward slashes
 norm=$(printf '%s' "$fp" | tr '\\' '/' | tr -s '/')
 
+# Only guard paths inside THIS repository. Fragment matching on the raw path
+# would otherwise block same-shaped paths in OTHER repos on the same machine
+# (verified: editing a template/vendored copy of the harness elsewhere was
+# blocked because its path contains ".claude/hooks/").
+root="$(pwd -P)"
+case "$norm" in
+  /*) case "$norm" in "$root"/*) ;; *) exit 0 ;; esac ;;
+esac
+
 # The gate proof is written only by gates.sh on a real pass — never by hand.
 # Match on the (unique) filename so dot-segment path variants
 # (.harness/./state/..., .../state/../state/...) can't slip past. Enforced

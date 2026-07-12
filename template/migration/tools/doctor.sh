@@ -72,7 +72,10 @@ else
 fi
 
 # Unfilled <...> placeholders in the docs the operator is expected to fill.
-ph=$(grep -rIlE '<[A-Za-z][^>]{0,60}>' CLAUDE.md AGENTS.md migration/*.md 2>/dev/null || true)
+# Deliberately the same NARROW pattern gates.sh blocks on: a broad any-<word>
+# scan flags legitimate content in real repos (C++ '#include <gtest/gtest.h>',
+# '<ls_libname>' in build docs) and then reports stale noise forever.
+ph=$(grep -rIlE '<[A-Z]{2,}( [A-Z]+)*>|<(legacy|target|source)-paths>|<Describe |<one line|<Platform/|<Concurrency/' CLAUDE.md AGENTS.md migration/*.md 2>/dev/null || true)
 if [ -n "$ph" ]; then
   echo "placeholders : REMAIN — fill the <...> markers in:"
   # shellcheck disable=SC2086
@@ -95,14 +98,17 @@ if [ "${#SCOPE[@]}" -eq 0 ]; then
 elif [ ! -f "$state" ]; then
   echo "proof: NONE (no gate recorded — run: bash migration/tools/gates.sh)"
 else
-  current=$(bash migration/tools/working-tree-hash.sh 2>/dev/null); rc=$?
+  hash_err="$(mktemp)"
+  current=$(bash migration/tools/working-tree-hash.sh 2>"$hash_err"); rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$current" ]; then
     echo "proof: UNKNOWN (working-tree-hash.sh failed — the hash tool may be broken)"
+    sed 's/^/  /' "$hash_err" 2>/dev/null | head -4
   elif [ "$current" = "$(cat "$state")" ]; then
     echo "proof: GATED (current tree matches the recorded gate run)"
   else
     echo "proof: STALE (tree changed since the last gate — re-run: bash migration/tools/gates.sh)"
   fi
+  rm -f "$hash_err" 2>/dev/null || true
 fi
 
 if [ "${#SCOPE[@]}" -gt 0 ]; then

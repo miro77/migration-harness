@@ -56,6 +56,32 @@ if [ -n "$root" ] && [ -f "$root/migration/harness.env" ]; then
   done
 fi
 
+# --- Blanket staging guard (universal) -------------------------------------
+# `git add -A` / `git add .` in an autonomous session sweeps unrelated
+# worktree edits into the slice commit (a real migration lost an evening to
+# ~50 swept files, several encoding-corrupted). Slices stage EXPLICIT paths.
+# Delete this block only if your project genuinely relies on bulk staging.
+#
+# Matching lessons, learned in both directions on a live migration:
+#  - Do NOT match the raw command naively: commit-message text such as
+#    `git commit -m "add -A docs"` is not staging, and a substring match
+#    blocks the agent's own commit messages.
+#  - Do NOT fix that by stripping ALL quoted regions: substitution-produced
+#    quotes (`git commit $(printf X) -a $(printf X)` where X emits a quote
+#    character) then hide a REAL -a between them - a confirmed bypass.
+#    Mask ONLY the -m/--message/-F argument; leave every other quote visible.
+cmd_noq=$(printf '%s' "$cmd" \
+  | sed "s/\\(-m\\|--message=\\{0,1\\}\\|-F\\)[[:space:]]*'[^']*'//g" \
+  | sed 's/\(-m\|--message=\{0,1\}\|-F\)[[:space:]]*\\\{0,1\}"\(\\.\|[^"\\]\)*\\\{0,1\}"//g')
+
+if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^;&|]*\badd\b[^;&|]*([[:space:]]-A\b|[[:space:]]-u\b|[[:space:]]--all\b|[[:space:]]--update\b|[[:space:]]--no-ignore-removal\b|[[:space:]]\.([[:space:]]|$)|[[:space:]]:/)'; then
+  block "Blocked: blanket staging (git add -A/-u/./--all). It sweeps unrelated edits into the commit. Stage the explicit files of THIS slice by path."
+fi
+
+if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^;&|]*\bcommit\b[^;&|]*([[:space:]]-a\b|[[:space:]]-am\b|[[:space:]]--all\b)'; then
+  block "Blocked: git commit -a stages all tracked edits. git add the explicit slice files, then commit. Tip: a message that must MENTION staging flags goes in a file (git commit -F <file>)."
+fi
+
 # --- Project-specific guards (edit for your stack) ------------------------
 # Block selective test exclusion so gates always run the full suite. Adapt the
 # pattern to your test runner. Examples (uncomment/adapt as needed):
