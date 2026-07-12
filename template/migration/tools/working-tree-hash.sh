@@ -22,7 +22,7 @@ read -r -a SCOPE <<< "${HARNESS_SCOPE:-}"
 # from the rebuilt tree, which changes the hash — so deletions are captured
 # without asking git about a path it can no longer see.
 PATHS=()
-for p in "${SCOPE[@]}"; do [ -e "$p" ] && PATHS+=("$p"); done
+for p in ${SCOPE[@]+"${SCOPE[@]}"}; do [ -e "$p" ] && PATHS+=("$p"); done
 
 # Put the throwaway index INSIDE the git dir. git never stages anything under
 # .git, so the index (and its .lock) can never leak into the hash — this holds
@@ -49,8 +49,12 @@ if [ "${#PATHS[@]}" -gt 0 ]; then
   # tools dir shadowed by a generic '**/build' pattern) makes `git add`
   # refuse the pathspec ("paths are ignored... use -f"), which otherwise
   # surfaces only as "no hash" and a closed Stop hook.
+  # ${excl[@]+...}: expanding an EMPTY array under set -u is an 'unbound
+  # variable' error on bash <= 4.3 (macOS system bash) — and empty is the
+  # default install (.harness gitignored). The +-expansion emits nothing
+  # when the array is empty and the quoted elements when it is not.
   for p in "${PATHS[@]}"; do
-    if ! GIT_INDEX_FILE="$tmp_index" git add -A -- "$p" "${excl[@]}" 2>/dev/null; then
+    if ! GIT_INDEX_FILE="$tmp_index" git add -A -- "$p" ${excl[@]+"${excl[@]}"} 2>/dev/null; then
       echo "working-tree-hash: HARNESS_SCOPE entry '$p' cannot be staged for hashing" >&2
       echo "  (most likely it is inside a gitignored directory - re-include it in" >&2
       echo "  .gitignore, e.g. '!/$p/', or remove it from HARNESS_SCOPE)" >&2

@@ -84,10 +84,14 @@ if [ -f migration/HANDOFF.md ]; then
 fi
 
 # Unfilled <...> placeholders in the docs the operator is expected to fill.
-# Deliberately the same NARROW pattern gates.sh blocks on: a broad any-<word>
-# scan flags legitimate content in real repos (C++ '#include <gtest/gtest.h>',
-# '<ls_libname>' in build docs) and then reports stale noise forever.
-ph=$(grep -rIlE '<[A-Z]{2,}( [A-Z]+)*>|<(legacy|target|source)-paths>|<Describe |<one line|<Platform/|<Concurrency/' CLAUDE.md AGENTS.md migration/*.md 2>/dev/null || true)
+# Deliberately NARROW: a broad any-<word> scan flags legitimate content in
+# real repos (C++ '#include <gtest/gtest.h>', '<ls_libname>' in build docs,
+# the '<unit>'/'<key>' notation in harness prose) and then reports stale
+# noise forever. Instead the pattern ENUMERATES every operator-fill marker
+# the template actually ships — including the lowercase ones in
+# legacy-runtime.md, spec-matrix.md, and PLAN.md that an all-caps-only scan
+# missed while reporting "placeholders : none".
+ph=$(grep -rIlE '<[A-Z]{2,}( [A-Z]+)*>|<(legacy|target|source)-paths>|<Describe |<one line|<Platform/|<Concurrency/|<How |<e\.g\. |<N source files>|<component>|<test id|<Language/runtime|<Build tool|<Any required|<exact ' CLAUDE.md AGENTS.md migration/*.md 2>/dev/null || true)
 if [ -n "$ph" ]; then
   echo "placeholders : REMAIN — fill the <...> markers in:"
   # shellcheck disable=SC2086

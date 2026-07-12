@@ -76,7 +76,11 @@ fingerprint="${tool_name}::${arg:0:80}::${sig:0:80}"
 # Rotate at ~5 MB (one .1 generation): nothing else ever truncates this file,
 # and a long --drive run appends to it across every tick.
 tlog=.harness/state/telemetry.ndjson
-tsize=$(wc -c < "$tlog" 2>/dev/null | tr -d '[:space:]')
+# NB: the redirection failure on a missing log comes from the SHELL, before
+# wc's 2>/dev/null applies — guard with -f so the first call of a session
+# doesn't leak "No such file or directory" into the hook's stderr.
+tsize=0
+[ -f "$tlog" ] && tsize=$(wc -c < "$tlog" 2>/dev/null | tr -d '[:space:]')
 case "$tsize" in ''|*[!0-9]*) tsize=0 ;; esac
 if [ "$tsize" -gt 5242880 ]; then mv -f "$tlog" "$tlog.1" 2>/dev/null || true; fi
 
@@ -132,6 +136,23 @@ if [ "$repeat" -ge "$threshold" ]; then
   msg="[HARNESS] Loop detected: '${tool_name}' called ${repeat} times with similar arguments in the last ${window} tool calls. Stop and reconsider your approach. Re-read your todo list, choose a different action, or persist state to .harness/state/slice-state/ (bash migration/tools/persist-state.sh) and end the tick if stuck."
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$msg"
   exit 0
+fi
+
+# Second tier, edit tools only: the content slice in the fingerprint stops
+# DIFFERENT edits to one file (a doc-heavy phase) reading as a loop — but an
+# agent spinning on a failing change varies its old/new strings slightly each
+# try, so exact repeats alone would never flag it. When same-tool-same-file
+# edits fill the ENTIRE window (a much stronger signal than the threshold),
+# nudge anyway.
+if [ -n "$sig" ]; then
+  prefix="${tool_name}::${arg:0:80}::"
+  prefix_repeat=$(awk -v p="$prefix" 'index($0, p) == 1 { n++ } END { print n+0 }' "$fp_file" 2>/dev/null)
+  case "$prefix_repeat" in ''|*[!0-9]*) prefix_repeat=0 ;; esac
+  if [ "$prefix_repeat" -ge "$window" ]; then
+    msg="[HARNESS] Possible loop: the last ${prefix_repeat} tool calls were ALL '${tool_name}' edits to the same file with differing content. If these edits are retries of one failing change, stop and reconsider the approach; if the file genuinely needs this many edits, carry on."
+    printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$msg"
+    exit 0
+  fi
 fi
 
 exit 0

@@ -96,9 +96,9 @@ When both axes are clear (or the idle backstop fires), write migration/HANDOFF.m
 whose FIRST LINE is its machine-readable terminal state:
 `STATUS: COMPLETE` (every row audited-pass, ledger fully wired, NO open
 PROPOSED-GATE-CHANGES entries), `STATUS: BLOCKED` (blocked rows, blocked
-ledger rows, or open gate proposals remain — an open proposal CAPS the state
-at BLOCKED, never claim COMPLETE past one), or `STATUS: FAILED` (audited-fail
-rows remain). Below that line, summarize all audited-fail rows, open
+ledger rows, open gate proposals, or OPEN ledger rows the idle backstop left
+behind remain — any of these CAPS the state at BLOCKED, never claim COMPLETE
+past one), or `STATUS: FAILED` (audited-fail rows remain). Below that line, summarize all audited-fail rows, open
 integration-ledger rows, pending decisions, and open PROPOSED-GATE-CHANGES
 entries. Run `bash migration/tools/gates.sh`, commit it
 (`migrate HANDOFF: done`), then verify the claim with

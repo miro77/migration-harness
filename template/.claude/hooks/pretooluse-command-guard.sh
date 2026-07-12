@@ -70,11 +70,19 @@ fi
 #    quotes (`git commit $(printf X) -a $(printf X)` where X emits a quote
 #    character) then hide a REAL -a between them - a confirmed bypass.
 #    Mask ONLY the -m/--message/-F argument; leave every other quote visible.
+#  - The command arrives JSON-ESCAPED (the extraction above keeps escapes):
+#    the message delimiter is the 2-char sequence \" while message CONTENT is
+#    built from raw-level units — a literal backslash pair (raw \\, encoded
+#    \\\\) or a bash-escaped quote (raw \", encoded \\\") or a plain char.
+#    The content alternatives below match exactly those units. The previous
+#    \\. content alternative also matched the closing \" itself, so with TWO
+#    -m messages the mask ran leftmost-longest to the LAST quote and
+#    swallowed a real -a sitting between them (confirmed bypass).
 cmd_noq=$(printf '%s' "$cmd" \
   | sed "s/\\(-m\\|--message=\\{0,1\\}\\|-F\\)[[:space:]]*'[^']*'//g" \
-  | sed 's/\(-m\|--message=\{0,1\}\|-F\)[[:space:]]*\\\{0,1\}"\(\\.\|[^"\\]\)*\\\{0,1\}"//g')
+  | sed 's/\(-m\|--message=\{0,1\}\|-F\)[[:space:]]*\\\{0,1\}"\(\\\\\\\\\|\\\\\\"\|[^"\\]\)*\\\{0,1\}"//g')
 
-if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^;&|]*\badd\b[^;&|]*([[:space:]]-A\b|[[:space:]]-u\b|[[:space:]]--all\b|[[:space:]]--update\b|[[:space:]]--no-ignore-removal\b|[[:space:]]\.([[:space:]]|$)|[[:space:]]:/)'; then
+if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^;&|]*\badd\b[^;&|]*([[:space:]]-A\b|[[:space:]]-u\b|[[:space:]]--all\b|[[:space:]]--update\b|[[:space:]]--no-ignore-removal\b|[[:space:]]\./?([[:space:]]|$)|[[:space:]]:/)'; then
   block "Blocked: blanket staging (git add -A/-u/./--all). It sweeps unrelated edits into the commit. Stage the explicit files of THIS slice by path."
 fi
 

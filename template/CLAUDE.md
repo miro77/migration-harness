@@ -183,8 +183,10 @@ bridges compaction boundaries.
 11. A user-facing feature is not done until it is REACHABLE in the running app.
     When a slice ships a feature without wiring its entry point, or leaves a
     runtime stub, record it in [`migration/integration-ledger.md`](migration/integration-ledger.md)
-    and ensure a matrix row will wire it. The migration cannot terminate while
-    that ledger holds an open (`built-unwired`/`stub`/`deferred-impl`) row.
+    and ensure a matrix row will wire it. The migration cannot terminate
+    COMPLETE while that ledger holds an open
+    (`built-unwired`/`stub`/`deferred-impl`) row — an idle-backstop stop with
+    open rows is at best BLOCKED.
 
 ## Definition of done (per slice)
 

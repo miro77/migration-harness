@@ -29,6 +29,11 @@ board="${MATRIX_FILE:-migration/parity-matrix.md}"
 rc=0
 while IFS= read -r unit; do
   [ -n "$unit" ] || continue
+  if [ "$unit" = "__NO_STATUS_COLUMN__" ]; then
+    echo "check-baselines: $board has a table but no 'status' header column - cannot locate T-row statuses" >&2
+    rc=1
+    continue
+  fi
   found=""
   for f in "migration/fixtures/$unit".baseline.*; do
     [ -e "$f" ] && { found="$f"; break; }
@@ -43,13 +48,20 @@ while IFS= read -r unit; do
 done < <(awk -F'|' '
   function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
   /^\|/ {
+    saw = 1
     n = split($0, c, "|")
-    if (col == 0) { for (i = 2; i <= n; i++) if (trim(c[i]) == "status") { col = i; break }; next }
+    # Header = the row whose FIRST cell is "id" (case-insensitive); other
+    # tables (the status-vocabulary legend) must not donate the column.
+    if (col == 0) { if (tolower(trim(c[2])) == "id") for (i = 3; i <= n; i++) if (tolower(trim(c[i])) == "status") { col = i; break }; next }
     id = trim(c[2])
     if (id ~ /^T-/ && trim(c[col]) == "audited-pass") {
       sub(/^T-/, "", id); sub(/\..*$/, "", id); print id
     }
   }
+  # A header with no status cell would otherwise consume every row above
+  # (col stays 0), emit zero units, and let the manifest stage pass green
+  # on a board it never parsed. Emit a sentinel the shell loop fails on.
+  END { if (saw && col == 0) print "__NO_STATUS_COLUMN__" }
 ' "$board" | sort -u)
 [ "$rc" -eq 0 ] || exit 1
 

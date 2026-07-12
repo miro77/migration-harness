@@ -16,8 +16,13 @@
 #   COMPLETE  every status-board row audited-pass, integration ledger fully
 #             wired, NO open gate-change proposals. The only state that
 #             means "the work is done".
-#   BLOCKED   nothing left the loop can do, but human decisions remain:
-#             blocked rows, blocked ledger rows, or open ## PROPOSAL entries.
+#   BLOCKED   the loop stopped short of COMPLETE and a human must look:
+#             blocked rows, blocked ledger rows, open ## PROPOSAL entries,
+#             or OPEN ledger rows (built-unwired/stub/deferred-impl) left
+#             when the idle backstop forced a stop - the tick prompt
+#             REQUIRES a handoff listing those, so they cap the state at
+#             BLOCKED rather than invalidate the record (an invalid-by-
+#             construction handoff would loop the driver on exit 65 forever).
 #   FAILED    audited-fail rows remain - implemented work did not pass its
 #             audit and a human must look.
 #
@@ -62,7 +67,11 @@ counts="$(awk -F'|' '
   /^\|/ {
     n = split($0, c, "|")
     if (col == 0) {
-      for (i = 2; i <= n; i++) if (trim(c[i]) == "status") { col = i; break }
+      # Header = the row whose FIRST cell is "id" (case-insensitive) — the
+      # board file holds other tables first (the status-vocabulary legend)
+      # whose "Status" cell must not be mistaken for the matrix header.
+      if (tolower(trim(c[2])) == "id")
+        for (i = 3; i <= n; i++) if (tolower(trim(c[i])) == "status") { col = i; break }
       next
     }
     first = trim(c[2])
@@ -82,7 +91,11 @@ n_pass=$1; n_fail=$2; n_block=$3; n_unfinished=$4; n_unknown=$5
 
 [ "$n_unknown" -eq 0 ]    || fail "$board has $n_unknown row(s) with an unrecognized status - fix the board first"
 [ "$n_unfinished" -eq 0 ] || fail "$board still has $n_unfinished unfinished row(s) (open/in-progress/split-required) - not a terminal state"
-[ "$n_pass" -gt 0 ]       || fail "$board has zero audited-pass rows - an empty or untouched board is not a completed effort"
+# An all-blocked or all-failed board is a legitimate BLOCKED/FAILED terminal
+# state; only a board with NO classified rows at all is an empty/untouched
+# effort that must not validate.
+[ $((n_pass + n_fail + n_block)) -gt 0 ] \
+  || fail "$board has zero classified rows - an empty or untouched board is not a terminal state"
 
 # --- integration ledger (reachability axis) ---
 n_ledger_open=0; n_ledger_blocked=0
@@ -103,8 +116,9 @@ if [ -f migration/integration-ledger.md ]; then
   set -- $lcounts
   n_ledger_open=$1; n_ledger_blocked=$2
 fi
-[ "$n_ledger_open" -eq 0 ] \
-  || fail "integration-ledger has $n_ledger_open OPEN row(s) (built-unwired/stub/deferred-impl) - wire them or block them; not a terminal state"
+# Open ledger rows do NOT invalidate the record: the idle backstop can force
+# a stop with them open, and the tick prompt mandates a handoff listing them.
+# They cap the terminal state at BLOCKED below - never COMPLETE.
 
 # --- open gate-change proposals ---
 n_props=0
@@ -116,14 +130,14 @@ fi
 # --- derive the actual terminal state and compare with the claim ---
 if [ "$n_fail" -gt 0 ]; then
   actual="FAILED"
-elif [ "$n_block" -gt 0 ] || [ "$n_ledger_blocked" -gt 0 ] || [ "$n_props" -gt 0 ]; then
+elif [ "$n_block" -gt 0 ] || [ "$n_ledger_blocked" -gt 0 ] || [ "$n_ledger_open" -gt 0 ] || [ "$n_props" -gt 0 ]; then
   actual="BLOCKED"
 else
   actual="COMPLETE"
 fi
 [ "$claimed" = "$actual" ] \
-  || fail "$handoff claims STATUS: $claimed but the boards say $actual (audited-fail=$n_fail blocked-rows=$n_block ledger-blocked=$n_ledger_blocked open-proposals=$n_props)"
+  || fail "$handoff claims STATUS: $claimed but the boards say $actual (audited-fail=$n_fail blocked-rows=$n_block ledger-blocked=$n_ledger_blocked ledger-open=$n_ledger_open open-proposals=$n_props)"
 
 echo "STATUS: $actual"
-echo "check-complete: valid terminal state ($board: $n_pass audited-pass, $n_fail audited-fail, $n_block blocked; ledger blocked=$n_ledger_blocked; open proposals=$n_props)"
+echo "check-complete: valid terminal state ($board: $n_pass audited-pass, $n_fail audited-fail, $n_block blocked; ledger blocked=$n_ledger_blocked open=$n_ledger_open; open proposals=$n_props)"
 exit 0

@@ -21,9 +21,30 @@ norm=$(printf '%s' "$fp" | tr '\\' '/' | tr -s '/')
 # would otherwise block same-shaped paths in OTHER repos on the same machine
 # (verified: editing a template/vendored copy of the harness elsewhere was
 # blocked because its path contains ".claude/hooks/").
+#
+# Compare PHYSICAL paths on both sides: the tool may spell an in-repo path via
+# a symlink (macOS /tmp -> /private/tmp, a ~/work link) or with dot-segments,
+# and a naive prefix test on the logical spelling would then exit 0 and skip
+# every guard below. Resolve the deepest EXISTING ancestor with cd + pwd -P
+# (the target itself may not exist yet — a Write of a new file). If resolution
+# fails, fall through to the guards: over-blocking a same-shaped path in
+# another repo is a recoverable annoyance, silently unguarding this one is not.
 root="$(pwd -P)"
 case "$norm" in
-  /*) case "$norm" in "$root"/*) ;; *) exit 0 ;; esac ;;
+  /*)
+    phys="$norm"; tail=""
+    while [ "$phys" != "/" ] && [ ! -d "$phys" ]; do
+      tail="/${phys##*/}$tail"
+      phys="${phys%/*}"; [ -n "$phys" ] || phys="/"
+    done
+    if phys="$(cd "$phys" 2>/dev/null && pwd -P)"; then
+      norm="${phys%/}$tail"
+      case "$norm" in
+        "$root"/*|"$root") ;;
+        *) exit 0 ;;
+      esac
+    fi
+    ;;
 esac
 
 # The gate proof is written only by gates.sh on a real pass — never by hand.

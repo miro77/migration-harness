@@ -45,7 +45,9 @@
 #        written — the loop is stuck; inspect
 #   65 = needs inspection: a run finished but the tree is NOT gate-covered,
 #        or HANDOFF.md exists/was written but is not a VALID termination
-#        record (untracked, modified, bad STATUS line, boards inconsistent)
+#        record (untracked, modified, bad STATUS line, boards inconsistent),
+#        or the single-instance lock is past its TTL while its owner still
+#        looks alive (a stall a scheduler must not read as success)
 #   70 = (--drive --review, headless) review required: an audited-fail or
 #        row-split commit landed; state is checkpointed — re-run to continue
 #   75 = stopped on a usage limit; the next scheduled run after reset continues
@@ -142,14 +144,21 @@ mkdir -p .harness
 if ! mkdir "$lock" 2>/dev/null; then
   if [ -n "$(find "$lock" -maxdepth 0 -mmin +"$ttl_min" 2>/dev/null)" ]; then
     # Age alone is not proof of death: a tick can legitimately run longer
-    # than the TTL. Only recover when the recorded owner is also GONE —
-    # otherwise a second driver starts concurrently with a live one.
+    # than the TTL. Only refuse recovery when the recorded owner is alive
+    # AND still looks like this driver (a bash process) — after a reboot the
+    # pid can be RECYCLED by an unrelated long-lived process of the same
+    # user, and a bare kill -0 then blocks recovery forever. And when we do
+    # refuse, exit 65 (inspect), not 0: the live-owner heartbeat below keeps
+    # the mtime fresh, so reaching this branch at all means the owner is
+    # dead, wedged, or its heartbeat broke — a scheduler must not read an
+    # indefinite stall as success.
     ownerpid="$(sed -n 's/^pid=\([0-9][0-9]*\).*/\1/p' "$lock/meta" 2>/dev/null | head -n 1)"
-    if [ -n "$ownerpid" ] && kill -0 "$ownerpid" 2>/dev/null; then
-      echo "kick-loop: lock is older than ${ttl_min}m but owner pid $ownerpid is ALIVE — not recovering; skipping this fire."
-      exit 0
+    ownercomm="$(ps -p "${ownerpid:-0}" -o comm= 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$ownerpid" ] && kill -0 "$ownerpid" 2>/dev/null && [ "$ownercomm" = "bash" ]; then
+      echo "kick-loop: lock is older than ${ttl_min}m but owner pid $ownerpid is ALIVE (bash) — not recovering. If no driver is really running, remove $lock." >&2
+      exit 65
     fi
-    echo "kick-loop: recovering stale lock ($lock older than ${ttl_min}m, owner${ownerpid:+ pid $ownerpid} gone)." >&2
+    echo "kick-loop: recovering stale lock ($lock older than ${ttl_min}m, owner${ownerpid:+ pid $ownerpid} gone or not a driver process)." >&2
     rm -rf "$lock"
     mkdir "$lock" 2>/dev/null || { echo "kick-loop: could not take lock after recovery — skipping." >&2; exit 0; }
   else

@@ -232,6 +232,27 @@ git add migration/HANDOFF.md >/dev/null 2>&1; git commit -qm h6 >/dev/null
 bash migration/tools/check-complete.sh >/dev/null 2>&1
 chk "complete: COMPLETE claim past an open proposal is invalid" "$?" 1
 
+# open integration-ledger rows CAP the state at BLOCKED. The idle-backstop
+# handoff (prompt-mandated, listing open rows) must be a VALID record — an
+# invalid-by-construction one looped the driver on exit 65 forever. COMPLETE
+# past an open row stays invalid.
+sed -i '/^## PROPOSAL: widen a gate$/d' migration/PROPOSED-GATE-CHANGES.md
+cat > migration/integration-ledger.md <<'EOF'
+| id | feature | status | closes-in |
+|----|---------|--------|-----------|
+| INTEG-01 | export | built-unwired | - |
+EOF
+bash migration/tools/check-complete.sh >/dev/null 2>&1
+chk "complete: COMPLETE claim over open ledger row is invalid" "$?" 1
+printf 'STATUS: BLOCKED\n\nidle backstop fired; INTEG-01 open\n' > migration/HANDOFF.md
+git add migration/integration-ledger.md migration/HANDOFF.md migration/PROPOSED-GATE-CHANGES.md >/dev/null 2>&1; git commit -qm h6b >/dev/null
+out="$(bash migration/tools/check-complete.sh 2>&1)"; rc=$?
+chk "complete: open ledger row with BLOCKED claim validates" "$rc" 0
+case "$out" in *"STATUS: BLOCKED"*) ok "complete: open ledger row derives BLOCKED";; *) no "complete: open ledger row derives BLOCKED" "$out" "STATUS: BLOCKED";; esac
+# wire the row back so the feature-profile COMPLETE fixture below stays green
+sed -i 's/built-unwired/wired/' migration/integration-ledger.md
+git add migration/integration-ledger.md >/dev/null 2>&1; git commit -qm h6c >/dev/null
+
 # feature profile: check-complete validates the SPEC board
 printf 'HARNESS_PROFILE="feature"\n' >> migration/harness.env
 cat > migration/spec-matrix.md <<'EOF'
@@ -309,12 +330,28 @@ mkdir -p .harness/kick-loop.lock
 out="$(KL 2>&1)"; case "$out" in *"another run holds"*) ok "kick-loop: respects a fresh lock";; *) no "kick-loop: respects a fresh lock" "$out" "another run holds";; esac
 rm -rf .harness
 
-# stale mtime but LIVE owner pid: must NOT recover (no concurrent drivers)
+# stale mtime but LIVE bash owner pid: must NOT recover (no concurrent
+# drivers) — and must exit 65, not 0: the heartbeat keeps a live owner's
+# mtime fresh, so reaching this state at all needs a human look, and a
+# scheduler must not read an indefinite stall as success.
 mkdir -p .harness/kick-loop.lock
 printf 'pid=%s started=x\n' "$$" > .harness/kick-loop.lock/meta
 touch -t 200001010000 .harness/kick-loop.lock 2>/dev/null || true
-out="$(KL 2>&1)"
+out="$(KL 2>&1)"; rc=$?
 case "$out" in *ALIVE*) ok "kick-loop: old lock with LIVE owner not recovered";; *) no "kick-loop: old lock with LIVE owner not recovered" "$out" "ALIVE";; esac
+chk "kick-loop: old lock with LIVE owner exits 65 (not silent 0)" "$rc" 65
+rm -rf .harness
+
+# stale mtime, live owner that is NOT a bash process: a RECYCLED pid (reboot
+# handed the dead driver's pid to an unrelated process) — must recover, or
+# the migration stalls forever behind a pid that never exits.
+sleep 300 & npid=$!
+mkdir -p .harness/kick-loop.lock
+printf 'pid=%s started=x\n' "$npid" > .harness/kick-loop.lock/meta
+touch -t 200001010000 .harness/kick-loop.lock 2>/dev/null || true
+out="$(KL 2>&1)"
+case "$out" in *"recovering stale lock"*) ok "kick-loop: recycled-pid (non-bash) owner recovered";; *) no "kick-loop: recycled-pid (non-bash) owner recovered" "$out" "recovering";; esac
+kill "$npid" 2>/dev/null
 rm -rf .harness
 
 # stale mtime and DEAD owner pid: recovered
@@ -379,6 +416,39 @@ printf '#!/usr/bin/env bash\necho missing_unit\n' > migration/tools/list-affecte
 chmod +x migration/tools/list-affected-units.sh
 out="$(bash migration/tools/check-matrix.sh 2>&1)"
 case "$out" in *"missing_unit"*) ok "oracle: coverage seam flags unit without rows";; *) no "oracle: coverage seam flags unit without rows" "$out" "missing_unit";; esac
+
+# coverage is EXACT on the base row id: unit "unit" is NOT covered by rows
+# T-unita/M-unita (substring matching hid exactly this silent miss), while
+# unit "unita" IS covered by them.
+printf '#!/usr/bin/env bash\necho unita\necho unit\n' > migration/tools/list-affected-units.sh
+out="$(bash migration/tools/check-matrix.sh 2>&1)"
+case "$out" in *"affected unit 'unit' has no row"*) ok "oracle: coverage is exact, not substring";; *) no "oracle: coverage is exact, not substring" "$out" "unit has no row";; esac
+case "$out" in *"affected unit 'unita'"*) no "oracle: unit with rows still covered" "$out" "unita covered";; *) ok "oracle: unit with rows still covered";; esac
+rm -f migration/tools/list-affected-units.sh
+
+# id-anchored, case-insensitive header hunt: the status-vocabulary legend
+# must not donate the status column, and a capitalized real header must
+# still parse (it used to make the validator pass an UNPARSED board).
+cat > migration/parity-matrix.md <<'EOF'
+| Status | Meaning |
+|---|---|
+| `open` | not started |
+
+| Id | Slice | Deps | Status |
+|----|-------|------|--------|
+| B01 | bootstrap | - | open |
+EOF
+out="$(bash migration/tools/check-matrix.sh 2>&1)"; rc=$?
+chk "oracle: legend + capitalized header validates" "$rc" 0
+case "$out" in *"1 row(s) validated"*) ok "oracle: capitalized header parses the data row";; *) no "oracle: capitalized header parses the data row" "$out" "1 row(s) validated";; esac
+# no recognizable header: must FAIL, not exit 0 having validated nothing
+printf '| key | state |\n|---|---|\n| B01 | open |\n' > migration/parity-matrix.md
+bash migration/tools/check-matrix.sh >/dev/null 2>&1
+chk "oracle: board without id/status header fails" "$?" 1
+# header-only board with zero data rows: must FAIL too
+printf '| id | deps | status |\n|---|---|---|\n' > migration/parity-matrix.md
+bash migration/tools/check-matrix.sh >/dev/null 2>&1
+chk "oracle: header-only board with zero rows fails" "$?" 1
 cd /; rm -rf "$R"
 
 # --- kick-loop --tick / --drive: fresh-context ticks ---
@@ -709,6 +779,16 @@ chk "guard: single-quoted message allowed"        "$(JGUARD "{\"tool_input\":{\"
 # block (a global quote-stripper would delete the -a between them)
 chk "guard: stray quotes around real -a still block" "$(JGUARD '{"tool_input":{"command":"git commit \" -a \" -m msg"}}')" 2
 chk "guard: real -a after a message still blocks"    "$(JGUARD '{"tool_input":{"command":"git commit -m \"x\" -a"}}')" 2
+# dot-slash spelling of whole-tree staging is the same blanket add
+chk "guard: git add ./ blocks (dot-slash spelling)"  "$(GUARD 'git add ./')" 2
+chk "guard: git add ./path allowed"                  "$(GUARD 'git add ./src/a.txt')" 0
+# the message mask must stop at each message's own closing quote: a real -a
+# BETWEEN two -m messages used to be swallowed by a mask running to the LAST
+# quote (confirmed bypass); -a as message TEXT must still be masked.
+chk "guard: real -a between two messages still blocks" "$(JGUARD '{"tool_input":{"command":"git commit -m \"feat: subject\" -a -m \"body\""}}')" 2
+chk "guard: two messages without -a allowed"           "$(JGUARD '{"tool_input":{"command":"git commit -m \"one\" -m \"two\""}}')" 0
+chk "guard: escaped quotes and -a text inside message allowed" "$(JGUARD '{"tool_input":{"command":"git commit -m \"say \\\"hi -a there\\\" ok\" f.md"}}')" 0
+chk "guard: message ending in backslash then real -a blocks"   "$(JGUARD '{"tool_input":{"command":"git commit -m \"x\\\\\" -a -m \"y\""}}')" 2
 cd /; rm -rf "$R"
 
 # ============================================================ hash: gitignored scope entry
@@ -735,6 +815,14 @@ chk "frozen: out-of-repo .claude/hooks path allowed" "$(FROZEN '/somewhere/else/
 chk "frozen: out-of-repo legacy-fragment path allowed" "$(FROZEN '/other/repo/legacy/src/A.java')" 0
 chk "frozen: in-repo absolute locked path still blocks" "$(FROZEN "$R/.claude/hooks/stop-require-gates.sh")" 2
 chk "frozen: in-repo relative locked path still blocks" "$(FROZEN '.claude/hooks/stop-require-gates.sh')" 2
+# aliased spellings of an in-repo path must still be guarded: a logical-vs-
+# physical prefix mismatch (symlinked checkout) or dot-segments used to exit
+# 0 BEFORE any guard, silently disabling all of them.
+ln -s "$R" "$R.lnk"
+chk "frozen: symlink-aliased locked path still blocks" "$(FROZEN "$R.lnk/.claude/hooks/stop-require-gates.sh")" 2
+chk "frozen: symlink-aliased frozen path still blocks" "$(FROZEN "$R.lnk/legacy/src/A.java")" 2
+chk "frozen: dot-segment absolute path still blocks"   "$(FROZEN "$R/./legacy/src/A.java")" 2
+rm -f "$R.lnk"
 cd /; rm -rf "$R"
 
 # ============================================================ telemetry: loop fingerprints
@@ -757,6 +845,20 @@ for i in 1 2 3; do
 done
 case "$out" in *Loop*detected*) ok "telemetry: identical edits still fire loop";;
   *) no "telemetry: identical edits still fire loop" "$out" "Loop detected";; esac
+# second tier: a spin whose edits DIFFER slightly each try must still surface
+# once same-file edits fill the ENTIRE window (5 of 6 stays quiet).
+rm -f .harness/state/tool-stats/fingerprints
+out=""
+for i in 1 2 3 4 5; do
+  out="$(printf '{"tool_name":"Edit","tool_input":{"file_path":"src/a.txt","old_string":"try %s","new_string":"fix %s"}}' "$i" "$i" \
+    | bash .claude/hooks/posttooluse-telemetry.sh 2>/dev/null)"
+done
+case "$out" in *"Possible loop"*) no "telemetry: same-file edits below window stay quiet" "nudged at 5" "quiet";;
+  *) ok "telemetry: same-file edits below window stay quiet";; esac
+out="$(printf '{"tool_name":"Edit","tool_input":{"file_path":"src/a.txt","old_string":"try 6","new_string":"fix 6"}}' \
+  | bash .claude/hooks/posttooluse-telemetry.sh 2>/dev/null)"
+case "$out" in *"Possible loop"*) ok "telemetry: window full of same-file edits fires nudge";;
+  *) no "telemetry: window full of same-file edits fires nudge" "$out" "Possible loop";; esac
 cd /; rm -rf "$R"
 
 # ============================================================ doctor (read-only report)
@@ -777,6 +879,12 @@ GATE; before="$(bash migration/tools/working-tree-hash.sh)"
 bash migration/tools/doctor.sh >/dev/null 2>&1
 after="$(bash migration/tools/working-tree-hash.sh)"
 chk "doctor: read-only (tree hash unchanged)" "$after" "$before"
+# the template ships lowercase operator-fill placeholders (legacy-runtime.md
+# '<exact build command(s)>', spec-matrix.md '<component>') — an all-caps-only
+# scan reported "placeholders : none" on an unconfigured install.
+out="$(bash migration/tools/doctor.sh 2>&1)"
+has "placeholders : REMAIN" "$out" "doctor: lowercase shipped placeholders reported"
+has "legacy-runtime.md" "$out" "doctor: placeholder report names legacy-runtime.md"
 cd /; rm -rf "$R"
 
 echo "----------------------------------------"

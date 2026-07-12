@@ -45,12 +45,19 @@ BEGIN {
   valid["audited-pass"]=1; valid["audited-fail"]=1; valid["blocked"]=1
 }
 /^\|/ {
+  sawtable = 1
   n = split($0, c, "|")
   if (statuscol == 0) {
-    for (i = 2; i <= n; i++) {
-      h = trim(c[i])
-      if (h == "status") statuscol = i
-      if (h == "deps")   depscol = i
+    # The header is the row whose FIRST cell is "id" (case-insensitive):
+    # the board file holds OTHER tables first (the status-vocabulary
+    # legend, headed "Status | Meaning") whose cells must not be mistaken
+    # for the matrix header.
+    if (tolower(trim(c[2])) == "id") {
+      for (i = 3; i <= n; i++) {
+        h = tolower(trim(c[i]))
+        if (h == "status") statuscol = i
+        if (h == "deps")   depscol = i
+      }
     }
     next
   }
@@ -92,15 +99,26 @@ END {
       else if (tbad != "") err("row " id " is " st " but T sub-row(s) not audited-pass:" tbad)
     }
   }
-  # (c) coverage via the optional seam
+  # (c) coverage via the optional seam. A row covers a unit only when its
+  # BASE id (T-/M- prefix and .sub suffix stripped) EQUALS the unit —
+  # substring matching counted unit "net" as covered by row "T-network",
+  # the exact silent miss this check exists to catch.
   if (UNITS != "") {
     while ((getline u < UNITS) > 0) {
       u = trim(u); if (u == "") continue
       covered = 0
-      for (r in rows) if (index(r, u) > 0) { covered = 1; break }
+      for (r in rows) {
+        base = r; sub(/^[TM]-/, "", base); sub(/\..*$/, "", base)
+        if (base == u) { covered = 1; break }
+      }
       if (!covered) err("coverage: affected unit \x27" u "\x27 has no row on the board")
     }
   }
+  # A validator that parsed NOTHING must not report green: a reformatted
+  # header (no cell reading exactly status) previously consumed every row
+  # in the header hunt and exited 0 with "0 row(s) validated".
+  if (sawtable && statuscol == 0) err("no header row with first cell \x27id\x27 and a \x27status\x27 column found - the board cannot be validated")
+  else if (length(rows) == 0)     err("no data rows parsed - an empty board validates nothing")
   if (nerr > 0) { print "check-matrix: " nerr " problem(s) on " ARGV[1] > "/dev/stderr"; exit 1 }
   printf "check-matrix: %d row(s) validated on %s\n", length(rows), ARGV[1]
 }
