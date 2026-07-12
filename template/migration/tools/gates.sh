@@ -9,6 +9,9 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# shellcheck source=/dev/null
+[ -f migration/harness.env ] && source migration/harness.env
+
 # Capture gate stderr to a failure file so the next fresh-context tick can
 # read the exact diagnostic (which test failed, what lint error was). On
 # success the file is cleared (rm at the end); on failure it persists and
@@ -52,6 +55,20 @@ fi
 # the user's unrelated documentation.
 bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration >&2 \
   || fail "broken internal Markdown reference(s) in the harness docs (see above; re-run: bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration)"
+
+# ===== IN-PLACE ORACLE GATES (opt-in: HARNESS_ORACLE="baselines") ==========
+# For in-place migrations (docs/IN-PLACE-PROFILE.md): validate the status
+# board mechanically and enforce the captured-baseline oracle. No-op unless
+# harness.env sets HARNESS_ORACLE="baselines"; check-baselines.sh ships with
+# a CONFIGURE step and fails until wired — an unconfigured oracle must not
+# report green.
+if [ "${HARNESS_ORACLE:-}" = "baselines" ]; then
+  bash migration/tools/check-matrix.sh >&2 \
+    || fail "status board inconsistent (migration/tools/check-matrix.sh)"
+  bash migration/tools/check-baselines.sh >&2 \
+    || fail "baseline oracle (migration/tools/check-baselines.sh)"
+fi
+# ==========================================================================
 
 # ===== PROJECT GATES (edit for your stack) ================================
 # Run format-check, static analysis, and the FULL test suite (including the

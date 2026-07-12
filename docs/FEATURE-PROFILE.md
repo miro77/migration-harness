@@ -46,18 +46,23 @@ implementation**. A criterion whose test is written after the fact, to match
 whatever the code happened to do, proves nothing — that is exactly the hollow
 test the `spec-auditor` hunts for.
 
-## What is NOT yet feature-flavored
+## Selecting the profile
 
-The core contract, spec board, and auditor above are complete. A few
-migration-worded helpers still assume the migration profile and are adapted per
-project as needed: the slice command
-([`.claude/commands/migrate-slice.md`](../template/.claude/commands/migrate-slice.md)),
-the tick/loop prompts
+Set `HARNESS_PROFILE="feature"` in
+[`harness.env`](../template/migration/harness.env). The tick/loop prompts
 ([`SINGLE-TICK-PROMPT.md`](../template/migration/SINGLE-TICK-PROMPT.md),
-[`LOOP-PROMPT.md`](../template/migration/LOOP-PROMPT.md)), and `PLAN.md`. They
-reference the parity matrix and "legacy"; swap those for the spec matrix and
-"criterion" when you drive a feature. The enforcement plumbing they call is
-profile-agnostic, so they work either way once the wording is aligned.
+[`LOOP-PROMPT.md`](../template/migration/LOOP-PROMPT.md)) read it and drive
+[`/feature-slice`](../template/.claude/commands/feature-slice.md) against
+[`spec-matrix.md`](../template/migration/spec-matrix.md) (bootstrap row S00);
+the completion validator
+([`check-complete.sh`](../template/migration/tools/check-complete.sh))
+validates the same board. The enforcement plumbing (gates, proof, Stop hook,
+locks) is profile-agnostic and needs no changes.
+
+Still adapted per project: `PLAN.md` (phase breakdown is inherently yours) and
+the `<...>` placeholders in `CLAUDE-feature.md` — rename the installed
+`CLAUDE-feature.md` (at your repo root after install) to `CLAUDE.md` as the
+operating contract.
 
 ## Why this works
 

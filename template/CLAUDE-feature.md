@@ -100,7 +100,18 @@ as a security boundary. Two consequences you must respect rather than route arou
 
 Gates pass on the current tree (new acceptance tests + full regression suite),
 fresh-context audit reports no blockers (or blockers are recorded as
-`audited-fail` in the matrix), matrix row updated, single commit created.
+`audited-fail` in the matrix), matrix row updated, the
+[`migration/integration-ledger.md`](migration/integration-ledger.md) updated
+(a feature shipped without a wired entry point, or behind a runtime stub, is
+recorded there and gets a wiring row — an unreachable feature is not done, no
+matter how green its tests), single commit created.
+
+Termination (the TERMINATION section of
+[`migration/SINGLE-TICK-PROMPT.md`](migration/SINGLE-TICK-PROMPT.md)) requires
+BOTH the spec matrix and the integration ledger clear, validated by
+`bash migration/tools/check-complete.sh`. Set `HARNESS_PROFILE="feature"` in
+[`migration/harness.env`](migration/harness.env) so the loop drives
+`/feature-slice` against the spec matrix.
 
 ## Resumability — checkpoint to disk
 

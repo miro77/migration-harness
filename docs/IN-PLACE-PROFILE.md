@@ -65,10 +65,28 @@ found or a failure that actually happened:
    every byte individually plausible in CP1252), the single most likely
    corruption in that codebase.
 
-Battle-tested implementations of all four (gtest-flavored) live in the LS
-libraries migration branch; adapt the JSON parsing and the scan regex to your
-stack. The strict matrix parser and the encoding-diff logic are stack-neutral
-and can be lifted as-is.
+What ships in the template vs what you adapt (set
+`HARNESS_ORACLE="baselines"` in `harness.env` to wire the shipped parts into
+`gates.sh`):
+
+- **Shipped, works out of the box**: the strict status-board validator
+  (`migration/tools/check-matrix.sh` — strict parsing, dep ordering,
+  T-before-M when the convention is used, plus a coverage seam: create a
+  `list-affected-units.sh` under `migration/tools/` that prints your affected
+  units one per line, and every unit must have a row) and the baseline MANIFEST check
+  (`migration/tools/check-baselines.sh` part 1 — an audited-pass T-row whose
+  fixture is missing or empty fails the gates).
+- **Shipped FAILING until you configure it**: baseline CONTENT parity
+  (`check-baselines.sh` part 2, between the `HARNESS:BASELINE-PARITY`
+  markers) — comparing captured results against the current run needs your
+  test runner's format. Like the PROJECT GATES block, an unconfigured oracle
+  refuses to report green. Sketch for gtest JSON: parse each fixture's
+  passing test names, parse the current run's JSON for the same unit, fail
+  on any name missing or no longer passing.
+- **Adapt per stack**: the capture script itself (mechanism 1) and the
+  encoding-diff gate (mechanism 4) — battle-tested gtest/CP1252-flavored
+  implementations live in the LS libraries migration branch and can be
+  lifted with minor changes.
 
 ## Phase-0 lessons that generalize
 

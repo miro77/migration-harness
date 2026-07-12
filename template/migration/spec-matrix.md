@@ -46,7 +46,8 @@ non-negotiable alongside the new acceptance tests.
 
 | id | criterion (observable, testable) | area / component | deps | status | acceptance test | findings |
 |----|----------------------------------|------------------|------|--------|-----------------|----------|
-| S01 | <e.g. "POST /widgets with a valid body returns 201 and the new id"> | <component> | - | open | <test id / path> | - |
+| S00 | bootstrap: spec broken into rows, gates configured and green on the untouched tree | - | - | open | gate run recorded in `.harness/state/` | - |
+| S01 | <e.g. "POST /widgets with a valid body returns 201 and the new id"> | <component> | S00 | open | <test id / path> | - |
 | ... | ... | ... | ... | open | ... | - |
 
 <Expand to full coverage during Phase 0 (spec breakdown). One row per
