@@ -39,7 +39,8 @@ template/                 # copy this into your target repo
     ├── spec-matrix.md    # feature-profile status board
     ├── decisions.md      # ADRs + PENDING decisions
     ├── SINGLE-TICK-PROMPT.md # one unit of work per fresh context (kick-loop --drive)
-    ├── LOOP-PROMPT.md    # same ticks, self-paced in one pasted session
+    ├── LOOP-PROMPT.md    # same ticks, self-paced in one session; delegates
+    │                     #   each tick to a subagent for a fresh window
     ├── inventory.md      # map of migratable units
     ├── legacy-runtime.md # verified build/run recipes for the oracle
     └── tools/            # gates.sh, record-gates.sh, working-tree-hash.sh,

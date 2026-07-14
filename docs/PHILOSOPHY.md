@@ -176,6 +176,32 @@ and a fresh session inherits only the disk state the gates vouch for — while
 [LOOP-PROMPT.md](../template/migration/LOOP-PROMPT.md) self-schedules the same
 ticks inside one session.
 
+The in-session pacing has a failure mode the driver does not: **a loop does not
+reset context between iterations.** Every tick is another turn in the same
+conversation, so an inline tick accumulates its legacy reads, fixture dumps and
+gate logs until compaction starts summarizing them away — and a summarizer
+cannot know that a fixture's exact value is load-bearing while the prose around
+it is not. Tick #30 then runs on the compacted residue of the previous 29,
+precisely when the remaining slices are the hard ones. That is not merely
+inefficient; in a parity migration the discarded detail *is* the product.
+
+So LOOP-PROMPT.md **delegates each tick to a subagent** and keeps only the
+summary. This is the in-session equivalent of what `--drive` gets from a fresh
+process, and it buys the same property: **every tick gets a full, fresh context
+window** rather than the leftovers, so quality stops decaying with depth. The
+honest cost is that a cold agent knows only what is on disk (§10 is the
+precondition, not a nicety — anything still living in a long session's head must
+be written down or re-derived every tick), and that delegation *moves* the
+context ceiling rather than removing it: a slice big enough to exhaust a fresh
+window is a slice that needs splitting (§5).
+
+One constraint outranks it. A subagent must **never be spawned into a contested
+tree** — a second writer's `git checkout` or gate run will corrupt it mid-slice.
+The concurrent-writer check (SINGLE-TICK-PROMPT.md step 0) therefore belongs to
+the orchestrator, before it delegates, and the orchestrator verifies the tick
+landed **from disk** rather than from the subagent's report: a report is a claim,
+and the status field is the one thing downstream ticks trust without re-checking.
+
 ## 10. Everything the next session needs is on disk
 
 [CLAUDE.md](../template/CLAUDE.md) (the contract), [PLAN.md](../template/migration/PLAN.md) (strategy), [parity-matrix.md](../template/migration/parity-matrix.md) (status),

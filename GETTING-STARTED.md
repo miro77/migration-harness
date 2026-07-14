@@ -119,6 +119,12 @@ usage-limit resets — recipes in `migration/RESUMING.md`.
 
 **Unattended, single self-paced session:** paste the contents of
 `migration/LOOP-PROMPT.md` into a fresh Claude Code session at the repo root.
+Use this only when you cannot run the driver above — a loop does not reset
+context between iterations, so that prompt delegates each tick to a subagent to
+get a fresh window per slice. It is the in-session approximation of `--drive`,
+not an equal: the orchestrating session still has to live for the whole
+migration, and it dies with the session. `--drive`'s driver is a shell script —
+it has no context to fill and nothing to forget.
 
 The first run should do Phase 0 (bootstrap): stand up `probes/`, generate the
 first fixtures, scaffold the target project, and expand `parity-matrix.md` to
