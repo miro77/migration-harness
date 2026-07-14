@@ -66,7 +66,7 @@ ga="$target/.gitattributes"
 # Ensure the file ends in a newline before appending, or the first rule merges
 # onto a pre-existing last line (e.g. `*.log binary`) and silently voids BOTH.
 if [ -f "$ga" ] && [ -s "$ga" ] && [ -n "$(tail -c1 "$ga")" ]; then printf '\n' >> "$ga"; fi
-for rule in '*.sh text eol=lf' 'harness.env text eol=lf'; do
+for rule in '*.sh text eol=lf' '*.ps1 text eol=lf' 'harness.env text eol=lf'; do
   # Whitespace-tolerant idempotency: squeeze spaces/tabs (keeping newlines) so an
   # already-present but differently-aligned rule isn't re-appended as a duplicate.
   if [ ! -f "$ga" ] || ! tr -s ' \t' ' ' < "$ga" | grep -qxF "$rule"; then

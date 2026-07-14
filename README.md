@@ -19,6 +19,9 @@ first one work:
 - **Unattended but bounded.** A driver advances one unit of work per tick —
   each tick in a fresh context, so quality doesn't degrade over a long run —
   and stops on a defined termination condition.
+- **Every tick is inspectable.** An append-only local journal records attempt
+  starts, classified outcomes, duration, tool-call count, and tree hashes, and
+  correlates them with the existing per-tool telemetry.
 
 ## What's in here
 
@@ -54,7 +57,8 @@ template/                 # copy this into your target repo
 ## Quick start
 
 See **[GETTING-STARTED.md](GETTING-STARTED.md)**. In short: run
-`bash install.sh` from your repo root (or `cp -R template/. .` — NOT
+`bash install.sh` from your repo root, or `.\install.ps1 -TargetDir .` on
+Windows (or `cp -R template/. .` — NOT
 `cp -r template/* .`: the `*` glob drops the dot-dir `.claude/` with every
 hook, agent, and command), edit `migration/harness.env` (scope + frozen
 paths) and the
@@ -63,6 +67,10 @@ in `CLAUDE.md`/`PLAN.md`, then run `bash migration/tools/kick-loop.sh --drive`
 (one slice per fresh context, back-to-back) — or paste
 `migration/LOOP-PROMPT.md` into a fresh Claude Code session for a single
 self-paced run.
+
+Windows also ships `.ps1` entry points for gates, diagnostics, the tick driver,
+and tests. They resolve Git Bash explicitly and execute the same `.sh` files, so
+there is only one proof and enforcement implementation.
 
 ## Example prompts
 

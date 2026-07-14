@@ -86,13 +86,23 @@ chk "stop: commit of gated content still allows" "$(STOP)" 0
 printf 'w\n' > src/a.txt; git add -A; git commit -qm ungated2 >/dev/null
 chk "stop: committed ungated blocks" "$(STOP)" 2
 git commit -q --allow-empty -m "migrate E01: audited-fail" >/dev/null
-chk "stop: audited-fail escape (clean) allows" "$(STOP)" 0
+chk "stop: empty audited-fail cannot launder prior ungated commit" "$(STOP)" 2
+git reset -q --hard HEAD~1
 GATE; git add -A; git commit -q --allow-empty -m "migrate E01: audited-pass" >/dev/null
 chk "stop: audited-pass allows" "$(STOP)" 0
 rm -rf .harness; chk "stop: deleted-proof reopen blocks" "$(STOP)" 2
 # retry (stop_hook_active) always releases
 printf '{"stop_hook_active":true}' | bash .claude/hooks/stop-require-gates.sh >/dev/null 2>&1
 chk "stop: retry (stop_hook_active) releases" "$?" 0
+cd /; rm -rf "$R"
+
+# A legitimate non-pass checkpoint is allowed only when it layers a
+# bookkeeping-only commit on top of a gated parent.
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+GATE
+printf '\ncheckpoint\n' >> migration/parity-matrix.md
+git add migration/parity-matrix.md; git commit -qm "migrate E01: audited-fail" >/dev/null
+chk "stop: audited-fail bookkeeping checkpoint allows" "$(STOP)" 0
 cd /; rm -rf "$R"
 
 # ============================================================ sole scoped root
@@ -102,7 +112,7 @@ rm -r src; chk "sole: rm root uncommitted blocks" "$(STOP)" 2
 git add -A; git commit -qm "removed src" >/dev/null
 chk "sole: rm root committed normal-subject blocks" "$(STOP)" 2
 git commit -q --allow-empty -m "migrate X: audited-fail" >/dev/null
-chk "sole: rm root committed audited-fail allows" "$(STOP)" 0
+chk "sole: audited-fail cannot launder committed deletion" "$(STOP)" 2
 cd /; rm -rf "$R"
 
 # no-proof committed deletion of the only scoped root must still block
@@ -388,8 +398,9 @@ rm -rf .harness
 # headless --review must STOP (exit 70), --review-log-only continues
 mkfake <<'FAKE'
 #!/usr/bin/env bash
-printf 'x\n' >> src/a.txt
-git add src/a.txt >/dev/null 2>&1
+bash migration/tools/gates.sh >/dev/null 2>&1
+printf '\nreview checkpoint\n' >> migration/parity-matrix.md
+git add migration/parity-matrix.md >/dev/null 2>&1
 git commit -qm "migrate T01: audited-fail" >/dev/null 2>&1
 exit 0
 FAKE
@@ -708,7 +719,9 @@ if [ "$n" -ge 2 ]; then
   git commit -qm "migrate HANDOFF: done" >/dev/null 2>&1
 else
   bash migration/tools/gates.sh >/dev/null 2>&1
-  git commit -q --allow-empty -m "migrate E01: audited-fail" >/dev/null 2>&1
+  printf '\nreview checkpoint\n' >> migration/parity-matrix.md
+  git add migration/parity-matrix.md >/dev/null 2>&1
+  git commit -qm "migrate E01: audited-fail" >/dev/null 2>&1
 fi
 exit 0
 FAKE
@@ -753,7 +766,7 @@ now="$(bash migration/tools/working-tree-hash.sh)"
 chk "scope-dot: proof stable w/ TMPDIR=.tmp (no self-ref)" "$now" "$(cat .harness/state/gates-passed.diffsha)"
 unset TMPDIR
 printf 'evil\n' > src/evil.txt; git add -A; git commit -qm "migrate Y: audited-fail" >/dev/null
-chk "scope-dot: audited-fail clean w/ untracked proof allows" "$(STOP)" 0
+chk "scope-dot: audited-fail code commit blocks despite untracked proof" "$(STOP)" 2
 printf 'more\n' >> src/evil.txt
 chk "scope-dot: dirty audited-fail blocks" "$(STOP)" 2
 cd /; rm -rf "$R"
@@ -772,6 +785,8 @@ chk "frozen: locked harness.env edit blocks"      "$(FROZEN 'migration/harness.e
 chk "frozen: parity-matrix edit allowed"          "$(FROZEN 'migration/parity-matrix.md')" 0
 chk "guard: --no-verify blocks"                   "$(GUARD 'git commit --no-verify -m x')" 2
 chk "guard: direct record-gates blocks"           "$(GUARD 'bash migration/tools/record-gates.sh')" 2
+chk "guard: globbed record-gates blocks"          "$(GUARD 'bash migration/tools/record-g*.sh')" 2
+chk "guard: quoted record-gates spelling blocks"  "$(GUARD 'bash migration/tools/record-gate\"\"s.sh')" 2
 chk "guard: redirect write to proof blocks"       "$(GUARD 'echo x > .harness/state/gates-passed.diffsha')" 2
 chk "guard: sed --in-place on proof blocks"       "$(GUARD 'sed --in-place s/a/b/ .harness/state/gates-passed.diffsha')" 2
 chk "guard: cat proof allowed"                    "$(GUARD 'cat .harness/state/gates-passed.diffsha')" 0

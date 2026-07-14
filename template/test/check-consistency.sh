@@ -46,6 +46,11 @@ exists CLAUDE.md "CLAUDE.md"
 for t in gates.sh record-gates.sh working-tree-hash.sh doctor.sh check-docs.sh check-stubs.sh kick-loop.sh gui-compare.py gui-capture.py persist-state.sh read-state.sh benchmark.sh; do
   exists "migration/tools/$t" "tool present"
 done
+for p in migration/tools/_git-bash.ps1 migration/tools/gates.ps1 \
+         migration/tools/doctor.ps1 migration/tools/kick-loop.ps1 \
+         migration/run-loop.ps1 test/run-all.ps1 test/powershell-selftest.ps1; do
+  exists "$p" "PowerShell entry point present"
+done
 # kick-loop.sh defaults to these prompt files per mode — both must ship.
 for p in LOOP-PROMPT.md SINGLE-TICK-PROMPT.md; do
   exists "migration/$p" "driver prompt present"

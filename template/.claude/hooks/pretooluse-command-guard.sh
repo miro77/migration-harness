@@ -15,11 +15,13 @@ block() { printf '%s\n' "$1" >&2; exit 2; }
 case "$cmd" in
   *--no-verify*)
     block "Blocked: --no-verify skips hooks. Fix the failing check instead of bypassing it." ;;
-  *record-gates.sh*)
-    block "Blocked: record-gates.sh writes the gate proof and must only be called by gates.sh after the gates actually pass. Run: bash migration/tools/gates.sh" ;;
   *check-frozen.sh*--record*|*--record*check-frozen.sh*)
     block "Blocked: --record writes the frozen-oracle baseline, i.e. it declares whatever the legacy tree contains RIGHT NOW to be the reference. An agent that can re-baseline can launder any drift it caused, which voids the oracle. A human records it once during bootstrap. To VERIFY the oracle: bash migration/tools/check-frozen.sh" ;;
 esac
+
+if printf '%s' "$cmd" | grep -Eq 'record-g[^[:space:];|&<>]*\.sh'; then
+  block "Blocked: record-gates.sh writes the gate proof and must only be called by gates.sh after the gates actually pass. Run: bash migration/tools/gates.sh"
+fi
 
 # Block WRITES to the proof file. Detection is intentionally CONSERVATIVE: any
 # write operator anywhere in a command that also names the proof file is blocked,

@@ -8,7 +8,9 @@
 #
 # Absence of a proof is treated as UNPROVEN, not as a free pass. The one
 # exception is an explicitly recorded non-pass checkpoint (audited-fail / a row
-# split) committed to a clean tree — legitimate stopping points, visible in git.
+# split) committed to a clean tree, whose parent was gate-covered and whose own
+# commit touches only migration bookkeeping — legitimate stopping points,
+# visible in git, not a free pass for code.
 #
 # Failure policy: fail-OPEN on environment (not a git repo, no harness.env, no
 # scope configured) — there is nothing to protect. But fail-CLOSED if the hash
@@ -71,11 +73,49 @@ if [ ! -f "$state" ] && [ "${#PATHS[@]}" -eq 0 ] \
   exit 0
 fi
 
+# Build the same scoped tree hash for a committed tree. The working-tree hasher
+# uses a throwaway index and writes a git tree object; this mirrors that for
+# HEAD^ so a checkpoint escape can prove it is layered on top of a gated parent
+# instead of laundering older un-gated commits.
+hash_commit(){
+  commit="$1"
+  tmp_index="$(mktemp "$(git rev-parse --git-dir)/harness-parent-index.XXXXXX")" || return 1
+  rm -f "$tmp_index"
+  GIT_INDEX_FILE="$tmp_index" git read-tree --empty 2>/dev/null || { rm -f "$tmp_index"; return 1; }
+  commit_paths=()
+  for p in "${SCOPE[@]}"; do
+    git cat-file -e "$commit:$p" 2>/dev/null && commit_paths+=("$p")
+  done
+  if [ "${#commit_paths[@]}" -gt 0 ]; then
+    git ls-tree -r "$commit" -- "${commit_paths[@]}" 2>/dev/null \
+      | awk -F '\t' '$2 !~ /^\.harness($|\/)/ { split($1, m, " "); print m[1] " " m[3] "\t" $2 }' \
+      | GIT_INDEX_FILE="$tmp_index" git update-index --index-info 2>/dev/null \
+      || { rm -f "$tmp_index"; return 1; }
+  fi
+  GIT_INDEX_FILE="$tmp_index" git write-tree 2>/dev/null
+  rc=$?
+  rm -f "$tmp_index"
+  return "$rc"
+}
+
+checkpoint_subject_ok(){
+  printf '%s\n' "$1" | grep -Eq '^migrate [A-Za-z0-9._-]+: (audited-fail|split into sub-slices)([[:space:]]|$)'
+}
+
+checkpoint_paths_ok(){
+  git diff-tree --no-commit-id --name-only -r HEAD -- 2>/dev/null \
+    | awk '
+      /^migration\/(parity-matrix|spec-matrix|HANDOFF|decisions|PROPOSED-GATE-CHANGES|integration-ledger|inventory|legacy-runtime|PLAN)\.md$/ { next }
+      NF { bad=1; print; next }
+      END { exit bad }
+    ' >/dev/null
+}
+
 # Escape hatch: a recorded non-pass checkpoint on a clean (fully committed)
-# tree is a legitimate stop. Exclude .harness from the cleanliness check so an
-# untracked proof file (e.g. HARNESS_SCOPE=".") doesn't read as "dirty". Markers
-# match the /migrate-slice commit conventions; edit to taste. Deliberate and
-# git-visible, not a silent bypass.
+# tree is a legitimate stop only if it is a checkpoint commit, not arbitrary
+# un-gated code with a magic word in the subject. Exclude .harness from the
+# cleanliness check so an untracked proof file (e.g. HARNESS_SCOPE=".") doesn't
+# read as "dirty".
 if [ "${#PATHS[@]}" -gt 0 ]; then
   dirty=$(git status --porcelain --untracked-files=all -- "${PATHS[@]}" ':(exclude).harness' 2>/dev/null)
 else
@@ -83,9 +123,12 @@ else
 fi
 if [ -z "$dirty" ]; then
   subject=$(git log -1 --format=%s 2>/dev/null || true)
-  case "$subject" in
-    *audited-fail*|*"split into sub-slices"*) exit 0 ;;
-  esac
+  if checkpoint_subject_ok "$subject" && [ -f "$state" ] && [ -n "$(git rev-parse --verify HEAD^ 2>/dev/null)" ]; then
+    parent_hash=$(hash_commit HEAD^ || true)
+    if [ -n "$parent_hash" ] && [ "$parent_hash" = "$(cat "$state")" ] && checkpoint_paths_ok; then
+      exit 0
+    fi
+  fi
 fi
 
 cat >&2 <<'MSG'
@@ -94,7 +137,9 @@ state (this includes changes you have already committed, deletions of scoped
 paths, and the case where no proof exists yet). Run:
   bash migration/tools/gates.sh
 Fix any failures, update migration/parity-matrix.md, then finish. If this is a
-deliberately recorded audited-fail or row-split checkpoint, commit it (clean
-tree, matching subject) and it will be allowed.
+deliberately recorded audited-fail or row-split checkpoint, it is allowed only
+when the parent tree was gated, the subject is `migrate <id>: audited-fail` or
+`migrate <id>: split into sub-slices`, and the commit touches only migration
+bookkeeping.
 MSG
 exit 2

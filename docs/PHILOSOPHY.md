@@ -84,9 +84,11 @@ redirects into `gates-passed.diffsha`) and editing it through the Edit/Write
 tool — but a process that reconstructs the tree hash by hand (`git write-tree`
 in a stray index) could still forge it, and the Stop hook is itself a single
 *challenge*: Claude Code re-invokes it with `stop_hook_active` on the retry, so a
-determined agent gets through after one refusal. The recorded-checkpoint escape
-(`audited-fail` / row-split commits) is likewise a git-visible convention, not an
-authenticated one.
+  determined agent gets through after one refusal. The recorded-checkpoint escape
+(`audited-fail` / row-split commits) is intentionally narrow: it requires the
+parent tree to match the last gate proof and the checkpoint commit to touch only
+migration bookkeeping. It prevents a clean checkpoint from becoming a subject-line
+laundering trick, but it is still a harness convention rather than a sandbox.
 
 The threat model is a *cooperating* agent that tends to over-claim, not an
 adversary trying to defeat its own harness. Within that model the proof does its

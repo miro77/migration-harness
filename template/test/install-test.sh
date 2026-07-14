@@ -43,7 +43,10 @@ for f in .claude/hooks/stop-require-gates.sh .claude/hooks/posttooluse-telemetry
          migration/tools/gates.sh migration/tools/doctor.sh migration/tools/persist-state.sh \
          migration/tools/read-state.sh migration/tools/benchmark.sh migration/harness.env \
          migration/LOOP-PROMPT.md migration/SINGLE-TICK-PROMPT.md \
-         CLAUDE.md AGENTS.md probes/README.md test/run-all.sh; do
+         migration/tools/_git-bash.ps1 migration/tools/gates.ps1 \
+         migration/tools/doctor.ps1 migration/tools/kick-loop.ps1 migration/run-loop.ps1 \
+         CLAUDE.md AGENTS.md probes/README.md test/run-all.sh test/run-all.ps1 \
+         test/powershell-selftest.ps1; do
   [ -e "$T/$f" ] && ok "install: landed $f" || no "install: missing $f"
 done
 [ -f "$T/README-mine.md" ] && ok "install: preserves pre-existing files" || no "install: clobbered pre-existing file"
@@ -67,6 +70,8 @@ printf '*.log binary' > "$T2/.gitattributes"        # deliberately NO trailing n
 bash "$DIST/install.sh" "$T2" >/dev/null 2>&1
 a="$(cd "$T2" && git add -A -f >/dev/null 2>&1; git check-attr eol -- migration/tools/gates.sh 2>/dev/null)"
 case "$a" in *"eol: lf"*) ok "install: eol=lf applies even when target .gitattributes lacked a final newline";; *) no "install: eol=lf applies with no-final-newline .gitattributes" "$a" "eol: lf";; esac
+pa="$(cd "$T2" && git check-attr eol -- migration/tools/gates.ps1 2>/dev/null)"
+case "$pa" in *"eol: lf"*) ok "install: eol=lf applies to PowerShell entry points";; *) no "install: PowerShell eol=lf rule" "$pa" "eol: lf";; esac
 grep -q '^\*\.log binary$' "$T2/.gitattributes" && ok "install: pre-existing no-newline rule preserved intact" || no "install: pre-existing rule preserved" "merged" "intact"
 rm -rf "$T2"
 

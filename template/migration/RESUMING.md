@@ -84,6 +84,20 @@ damages something.
 
 ## Windows: `migration/run-loop.ps1` (recommended)
 
+The common commands have PowerShell entry points:
+
+```powershell
+.\migration\tools\doctor.ps1
+.\migration\tools\gates.ps1
+.\migration\tools\kick-loop.ps1 --tick
+.\test\run-all.ps1
+```
+
+These resolve Git Bash explicitly and delegate to the corresponding `.sh`
+implementation, preserving its output and exit code. For a long unattended run,
+use the supervisor below; it additionally owns retry policy and reaps orphaned
+Windows CLI processes.
+
 ```powershell
 .\migration\run-loop.ps1                          # 30 slices, 10 per batch
 .\migration\run-loop.ps1 -MaxSlices 5 -Batch 5
@@ -130,16 +144,18 @@ repeatedly.
 */30 * * * * cd /path/to/repo && bash migration/tools/kick-loop.sh --drive >> .harness/kick-loop.log 2>&1
 ```
 
-**Windows (Task Scheduler)** — daily at 03:10. Two traps here: plain `bash`
-often resolves to `C:\Windows\System32\bash.exe` (the WSL launcher), which
-fails if no WSL distro is installed — use the **full Git Bash path**. And a
-bare `bin\bash.exe` starts WITHOUT `/usr/bin` on `PATH` (`cat`, `grep`,
-`find`, `touch` all missing, so the script dies before reaching Claude) — pass
-`-l` so a login shell sets the PATH up first:
+**Windows (Task Scheduler)** — daily at 03:10. Use the PowerShell supervisor and
+set the working directory explicitly; Task Scheduler otherwise starts it under
+`C:\Windows\System32`, outside the repository:
 
-```
-schtasks /Create /TN migrate-resume /SC DAILY /ST 03:10 /TR ^
-  "\"C:\Program Files\Git\bin\bash.exe\" -lc 'cd /c/path/to/repo && bash migration/tools/kick-loop.sh --drive >> .harness/kick-loop.log 2>&1'"
+```powershell
+$repo = 'C:\path\to\repo'
+$action = New-ScheduledTaskAction `
+  -Execute 'powershell.exe' `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$repo\migration\run-loop.ps1`"" `
+  -WorkingDirectory $repo
+$trigger = New-ScheduledTaskTrigger -Daily -At '03:10'
+Register-ScheduledTask -TaskName 'migrate-resume' -Action $action -Trigger $trigger
 ```
 
 **Cloud routine** — if the repo is on GitHub, schedule a cloud agent for just
@@ -148,7 +164,8 @@ machine required — BUT the runner must have a **persistent workspace/volume**
 (or archive-and-restore the working tree between invocations). "State lives on
 disk" includes the parts a push does NOT carry: uncommitted mid-slice work
 after a usage-limit interruption, and the local `.harness/` state
-(`last-gate-failure.txt`, idle-ticks, slice-state, the gate proof). An
+(`last-gate-failure.txt`, idle-ticks, slice-state, the gate proof, and the
+append-only `runs.ndjson` lifecycle journal). An
 ephemeral runner that only `git pull`s silently discards all of that — the
 next tick re-does or, worse, half-trusts lost work. If a persistent workspace
 is impossible, at minimum `tar` the worktree + `.harness/` to durable storage

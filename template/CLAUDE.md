@@ -67,11 +67,14 @@ done only when BOTH are clear (see hard rule 11).
 
 ## Enforcement threat model — what the hooks do and don't do
 
-The real control is the **content-addressed proof**: a turn may only end when the
-scoped tree hashes to a recorded successful gate run. A commit does not launder
-un-gated changes, and neither does deleting a scoped path. That, plus the
+The normal control is the **content-addressed proof**: a turn may only end when
+the scoped tree hashes to a recorded successful gate run. A commit does not
+launder un-gated changes, and neither does deleting a scoped path. That, plus the
 git-visible audit trail and the fresh-context `parity-auditor`, is what makes a
-"done" claim trustworthy.
+cooperating agent's "done" claim trustworthy. It is not a sandbox: an agent that
+directly forges `.harness/state/gates-passed.diffsha` or weakens `gates.sh` can
+lie to the Stop hook. The command/path hooks block the obvious route to that,
+but CI or human review is the adversarial backstop.
 
 The frozen oracle gets the same treatment, and for the same reason. The PreToolUse
 hooks block the *actions* that would edit it — but action interception is
@@ -97,10 +100,12 @@ must respect rather than route around:
 - The harness's own enforcement files — `migration/tools/`, `.claude/hooks/`,
   `.claude/settings*.json`, `migration/harness.env` — are **locked**
   (`HARNESS_LOCKED`). Never weaken your own gates: editing `gates.sh` to a no-op
-  and then recording a "pass" is the exact bypass these locks exist to stop. If a
-  gate genuinely needs to change (e.g. a missing consumer-build check), do NOT
-  route around the lock and do NOT leave it as an ad-hoc note: record the exact
-  proposed edit in [`migration/PROPOSED-GATE-CHANGES.md`](migration/PROPOSED-GATE-CHANGES.md)
+  and then recording a "pass" is the exact bypass these locks exist to stop.
+  Unlike the frozen oracle, these files do not have a committed integrity
+  baseline checked by `gates.sh`; the lock is an action guard. If a gate genuinely
+  needs to change (e.g. a missing consumer-build check), do NOT route around the
+  lock and do NOT leave it as an ad-hoc note: record the exact proposed edit in
+  [`migration/PROPOSED-GATE-CHANGES.md`](migration/PROPOSED-GATE-CHANGES.md)
   (not locked), which `doctor.sh` surfaces and `HANDOFF.md` must list. A human
   applies it and re-gates outside the agent session. The migration is not done
   while an open proposal remains — the proof only covers gates that actually ran.
@@ -113,12 +118,13 @@ must respect rather than route around:
   let the background step finish, then gate BEFORE the slice commit. Never run
   gates concurrently with a build sharing the same build dirs, and never treat
   the release as permission to skip the gate on the final tree.
-- The recorded-checkpoint escape (a clean commit whose subject contains
-  `audited-fail` or `split into sub-slices`) is the one way a turn ends
-  WITHOUT a gate proof for the current tree. That is deliberate — anti-wedge,
-  and git-visible — but it makes those commits the **un-audited trust
-  boundary**: treat every `audited-fail` commit as needing human review
-  (`kick-loop.sh --drive --review` pauses exactly there), never as gated work.
+- The recorded-checkpoint escape is narrow: the subject must be
+  `migrate <id>: audited-fail...` or `migrate <id>: split into sub-slices...`,
+  the parent tree must match the last gate proof, and the checkpoint commit may
+  touch only migration bookkeeping. It exists so a row can be recorded honestly
+  without pretending the current tree is gated. Treat every `audited-fail`
+  commit as needing human review (`kick-loop.sh --drive --review` pauses there),
+  never as gated work.
 
 ## Within-slice controls — observability, budget, loop detection
 

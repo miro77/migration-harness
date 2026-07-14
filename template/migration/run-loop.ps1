@@ -110,7 +110,7 @@ function Write-TickPrompt {
 
 function Exit-ExistingHandoff {
     Say 'migration/HANDOFF.md is present -- validating terminal state.' 'Yellow'
-    $ccout = @(& $bash 'migration/tools/check-complete.sh' 2>&1)
+    $ccout = @(& $bash --login -c 'exec "$@"' harness 'migration/tools/check-complete.sh' 2>&1)
     $ccrc = $LASTEXITCODE
     foreach ($line in $ccout) { Say "    $line" 'Gray' }
     if ($ccrc -ne 0) {
@@ -184,7 +184,7 @@ if (-not $bash) {
     Say 'The harness needs Git Bash (MINGW64); WSL cannot see claude.exe.' 'Red'
     exit 2
 }
-$uname = (& $bash -c 'uname -s') 2>$null
+$uname = (& $bash --login -c 'exec uname -s') 2>$null
 if ($uname -notmatch 'MINGW|MSYS') {
     Say "resolved bash is not Git Bash (uname='$uname') -- refusing." 'Red'
     exit 2
@@ -194,7 +194,7 @@ Say "bash: $bash ($uname)" 'Gray'
 # claude must be visible to GIT BASH, not merely to PowerShell: kick-loop.sh is what
 # invokes it. Checking only PowerShell's view passes, then the driver dies one line
 # later -- checking the wrong thing and passing is worse than not checking.
-$claudeInBash = (& $bash -c 'command -v claude') 2>$null
+$claudeInBash = (& $bash --login -c 'p=$(command -v claude) || exit; printf "%s\n" "$p"; exec true') 2>$null
 if (-not $claudeInBash) {
     Say 'the `claude` CLI is not on Git Bash''s PATH (kick-loop.sh cannot invoke it)' 'Red'
     exit 2
@@ -249,7 +249,7 @@ try {
         Say ("--- driver: --drive --max {0}  (landed {1}/{2})" -f `
              $thisBatch, $landed, $MaxSlices) 'Cyan'
 
-        $driverArgs = @('migration/tools/kick-loop.sh', '--drive', '--max', $thisBatch, '--prompt', '.harness/run-loop-prompt.md')
+        $driverArgs = @('--login', '-c', 'exec "$@"', 'harness', 'migration/tools/kick-loop.sh', '--drive', '--max', $thisBatch, '--prompt', '.harness/run-loop-prompt.md')
         if ($Review) { $driverArgs += '--review' }
 
         & $bash @driverArgs 2>&1 | Tee-Object -FilePath $log -Append
