@@ -163,8 +163,15 @@ if ! mkdir "$lock" 2>/dev/null; then
     # dead, wedged, or its heartbeat broke — a scheduler must not read an
     # indefinite stall as success.
     ownerpid="$(sed -n 's/^pid=\([0-9][0-9]*\).*/\1/p' "$lock/meta" 2>/dev/null | head -n 1)"
+    # GNU/procps supports `-o comm=`; Git Bash's MSYS ps does not. Fall back
+    # to the final COMMAND column and normalize a possible /usr/bin/ prefix.
     ownercomm="$(ps -p "${ownerpid:-0}" -o comm= 2>/dev/null | tr -d '[:space:]')"
-    if [ -n "$ownerpid" ] && kill -0 "$ownerpid" 2>/dev/null && [ "$ownercomm" = "bash" ]; then
+    if [ -z "$ownercomm" ]; then
+      ownercomm="$(ps -p "${ownerpid:-0}" 2>/dev/null | awk 'NR == 2 { print $NF }')"
+    fi
+    ownercomm="${ownercomm##*/}"
+    if [ -n "$ownerpid" ] && kill -0 "$ownerpid" 2>/dev/null \
+       && { [ "$ownercomm" = "bash" ] || [ "$ownercomm" = "bash.exe" ]; }; then
       echo "kick-loop: lock is older than ${ttl_min}m but owner pid $ownerpid is ALIVE (bash) — not recovering. If no driver is really running, remove $lock." >&2
       exit 65
     fi
@@ -179,51 +186,117 @@ fi
 printf 'pid=%s started=%s\n' "$$" "$(date -u +%FT%TZ 2>/dev/null || echo now)" > "$lock/meta" 2>/dev/null || true
 # Heartbeat: refresh the lock mtime while THIS process lives — a single tick
 # can run longer than the TTL, and the per-tick touch is not enough. Stale
-# recovery above requires BOTH an old mtime AND a dead owner pid.
-( while kill -0 "$$" 2>/dev/null; do touch "$lock" 2>/dev/null || true; sleep 60; done ) >/dev/null 2>&1 &
+# recovery above requires BOTH an old mtime AND a dead owner pid. The TERM trap
+# also kills the current sleep child; without it, MSYS leaves that child alive
+# and command hosts can wait up to 60 seconds after every completed tick.
+heartbeat(){
+  local sleeper=""
+  trap '[ -z "$sleeper" ] || { kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null; }; exit 0' TERM INT
+  while kill -0 "$$" 2>/dev/null; do
+    touch "$lock" 2>/dev/null || true
+    sleep 60 & sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    sleeper=""
+  done
+}
+heartbeat >/dev/null 2>&1 &
 hb_pid=$!
-trap 'kill "$hb_pid" 2>/dev/null; rm -rf "$lock" 2>/dev/null' EXIT
+cleanup(){
+  kill "$hb_pid" 2>/dev/null || true
+  wait "$hb_pid" 2>/dev/null || true
+  rm -rf "$lock" 2>/dev/null
+}
+trap cleanup EXIT
 
 command -v claude >/dev/null 2>&1 || {
   echo "kick-loop: the 'claude' CLI must be on PATH to drive the loop headlessly." >&2
   exit 2
 }
 
+# Append-only lifecycle records make a scheduled run inspectable even when its
+# console output was not retained. A run.start without a matching run.end is an
+# interrupted process; completed attempts carry their classified outcome.
+run_log=.harness/state/runs.ndjson
+json_escape(){ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+append_run_event(){
+  local size=0
+  mkdir -p .harness/state 2>/dev/null || return 0
+  [ -f "$run_log" ] && size=$(wc -c < "$run_log" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -gt 5242880 ]; then
+    mv -f "$run_log" "$run_log.1" 2>/dev/null || true
+  fi
+  printf '%s\n' "$1" >> "$run_log" 2>/dev/null || true
+}
+
 # One headless claude session with the chosen prompt, outcome classified.
 # Prints the transcript; returns 0 = finished gate-covered, 65 = finished but
 # NOT gate-covered, 75 = usage limit, else claude's own non-zero exit.
+run_seq=0; tick=0
 run_once(){
-  local out rc verifier
+  local out rc verifier final_rc outcome started_ts ended_ts started_epoch ended_epoch
+  local duration calls before after run_id run_tick prompt_esc mode_esc before_esc after_esc
   rm -rf .harness/state/tool-stats 2>/dev/null || true   # fresh per-session stats
-  out="$(claude -p "$promptext" 2>&1)"
+  run_seq=$((run_seq + 1))
+  run_tick="${tick:-0}"
+  started_ts=$(date -u +%FT%TZ 2>/dev/null || echo now)
+  started_epoch=$(date +%s 2>/dev/null || echo 0)
+  run_id="${started_ts}-$$-${run_seq}"
+  before="$(tree_sig)"
+  prompt_esc=$(json_escape "$prompt")
+  mode_esc=$(json_escape "$mode")
+  before_esc=$(json_escape "$before")
+  export HARNESS_RUN_ID="$run_id"
+  append_run_event "{\"event\":\"run.start\",\"ts\":\"$started_ts\",\"run_id\":\"$run_id\",\"mode\":\"$mode_esc\",\"tick\":$run_tick,\"prompt\":\"$prompt_esc\",\"tree\":\"$before_esc\"}"
+
+  # next_model is set by the escalation path below (empty = the session default).
+  if [ -n "${next_model:-}" ]; then
+    echo "kick-loop: running this tick on model '$next_model' (escalated)."
+    out="$(claude --model "$next_model" -p "$promptext" 2>&1)"
+  else
+    out="$(claude -p "$promptext" 2>&1)"
+  fi
   rc=$?
   printf '%s\n' "$out"
 
   # A usage-limit stop is a PAUSE, not a failure — but it only ever comes with a
   # NON-ZERO exit. Never classify an exit-0 run as rate-limited (its transcript
   # may legitimately mention "rate limit"/"quota" as ordinary content).
+  final_rc="$rc"; outcome="cli_error"
   if [ "$rc" -ne 0 ]; then
     if printf '%s' "$out" | grep -qiE 'usage limit|rate limit|quota (exceeded|reached)|limit reached|resets? (at|in)|out of (tokens|credits)'; then
       echo "kick-loop: hit a usage limit — the next scheduled run after reset will continue."
-      return 75
+      final_rc=75; outcome="usage_limit"
+    else
+      echo "kick-loop: claude exited $rc (not a usage limit) — inspect." >&2
     fi
-    echo "kick-loop: claude exited $rc (not a usage limit) — inspect." >&2
-    return "$rc"
+  else
+    final_rc=0; outcome="gate_covered"
+    # claude exited 0. Do NOT trust that blindly: verify the run left a
+    # gate-covered or otherwise legitimate end state by reusing the Stop hook's
+    # own verdict (which also honours the audited-fail / row-split
+    # committed-checkpoint escape, so a clean recorded checkpoint is not
+    # mis-flagged). If the hook is absent, we cannot verify, so pass through.
+    verifier=".claude/hooks/stop-require-gates.sh"
+    if [ -f "$verifier" ]; then
+      if ! printf '{"stop_hook_active":false}' | bash "$verifier" >/dev/null 2>&1; then
+        echo "kick-loop: run finished (exit 0) but the tree is NOT covered by a gate proof (Stop verifier blocked) — inspect before trusting it." >&2
+        final_rc=65; outcome="ungated"
+      fi
+    fi
   fi
 
-  # claude exited 0. Do NOT trust that blindly: verify the run left a
-  # gate-covered or otherwise legitimate end state by reusing the Stop hook's
-  # own verdict (which also honours the audited-fail / row-split
-  # committed-checkpoint escape, so a clean recorded checkpoint is not
-  # mis-flagged). If the hook is absent, we cannot verify, so pass through.
-  verifier=".claude/hooks/stop-require-gates.sh"
-  if [ -f "$verifier" ]; then
-    if ! printf '{"stop_hook_active":false}' | bash "$verifier" >/dev/null 2>&1; then
-      echo "kick-loop: run finished (exit 0) but the tree is NOT covered by a gate proof (Stop verifier blocked) — inspect before trusting it." >&2
-      return 65
-    fi
+  ended_ts=$(date -u +%FT%TZ 2>/dev/null || echo now)
+  ended_epoch=$(date +%s 2>/dev/null || echo 0)
+  duration=0
+  if [ "$started_epoch" -gt 0 ] 2>/dev/null && [ "$ended_epoch" -ge "$started_epoch" ] 2>/dev/null; then
+    duration=$((ended_epoch - started_epoch))
   fi
-  return 0
+  calls=$(cat .harness/state/tool-stats/call_count 2>/dev/null || echo 0)
+  case "$calls" in ''|*[!0-9]*) calls=0 ;; esac
+  after="$(tree_sig)"; after_esc=$(json_escape "$after")
+  append_run_event "{\"event\":\"run.end\",\"ts\":\"$ended_ts\",\"run_id\":\"$run_id\",\"outcome\":\"$outcome\",\"exit_code\":$final_rc,\"duration_s\":$duration,\"tool_calls\":$calls,\"tree\":\"$after_esc\"}"
+  return "$final_rc"
 }
 
 # Change signature for the --drive no-progress backstop: the scoped CONTENT
@@ -248,6 +321,13 @@ fi
 # backstop for a model that fails to keep that bookkeeping.
 max_ticks="${max_arg:-${HARNESS_MAX_TICKS:-50}}"
 idle=0; tick=0
+
+# Cross-model escalation (opt-in): after this many consecutive no-progress ticks,
+# run the next one on a different model. Off unless HARNESS_ESCALATE_MODEL is set.
+escalate_model="${HARNESS_ESCALATE_MODEL:-}"
+escalate_after="${HARNESS_ESCALATE_AFTER:-1}"
+case "$escalate_after" in ''|*[!0-9]*) escalate_after=1 ;; esac
+next_model=""
 while :; do
   if [ "$tick" -ge "$max_ticks" ]; then
     echo "kick-loop: tick budget spent ($max_ticks ticks) — state is checkpointed on disk; re-run to continue."
@@ -299,11 +379,32 @@ while :; do
   fi
   if [ "$(tree_sig)" = "$before" ]; then
     idle=$((idle+1))
+    # Cross-model escalation. A model that is stuck tends to stay stuck in the
+    # same way, and a fresh context of the SAME model is still the same model —
+    # the fresh-context tick buys independence from the conversation, not from
+    # the blind spot. A different model is the cheapest source of a genuinely
+    # different read. (Field evidence from this harness: a different-VENDOR
+    # adversarial review found four blockers that the internal fresh-context
+    # audit had passed.)
+    #
+    # Escalation gets exactly one tick before the idle backstop fires. That is
+    # deliberate: if two DIFFERENT models both make no progress, the problem is
+    # not the model, and a human should look.
+    if [ -n "$escalate_model" ] && [ "$escalate_after" -gt 0 ] \
+       && [ "$idle" -ge "$escalate_after" ] && [ -z "$next_model" ]; then
+      next_model="$escalate_model"
+      echo "kick-loop: $idle consecutive tick(s) changed nothing — escalating the next tick to model '$escalate_model'."
+    fi
     if [ "$idle" -ge 2 ]; then
-      echo "kick-loop: two consecutive ticks changed nothing and no $done_marker was written — stopping this drive; inspect." >&2
+      if [ -n "$escalate_model" ]; then
+        echo "kick-loop: two consecutive ticks changed nothing (the second on '$escalate_model') and no $done_marker was written — two different models made no progress, so this is not a model problem. Stopping; inspect." >&2
+      else
+        echo "kick-loop: two consecutive ticks changed nothing and no $done_marker was written — stopping this drive; inspect." >&2
+      fi
       exit 64
     fi
   else
     idle=0
+    next_model=""     # progress: back to the session default model
   fi
 done

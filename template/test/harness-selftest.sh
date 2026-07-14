@@ -1056,6 +1056,100 @@ printf 'a later slice edits the code\n' > src/a.txt
 chk "audits: row audited-pass at HEAD is not re-checked" "$(AUD)" 0
 cd /; rm -rf "$R"
 
+# ==================================================== held-out parity
+# Cases generated from the oracle AT GATE TIME: they did not exist while the code
+# was written, so there was nothing to overfit to. Ephemerality is the defense.
+HOLD(){ bash migration/tools/check-holdout.sh >/dev/null 2>&1; echo $?; }
+# Replace the HOLDOUT block with a stub that succeeds or fails on demand. sed's
+# 'c' command deletes the MARKER lines along with the range, so re-wiring a second
+# time would match nothing and silently leave the previous stub in place — restore
+# the pristine tool first.
+wire_holdout(){
+  cp "$H/migration/tools/check-holdout.sh" migration/tools/check-holdout.sh
+  sed -i "/# HARNESS:HOLDOUT-START/,/# HARNESS:HOLDOUT-END/c\\$1" migration/tools/check-holdout.sh
+}
+
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+chk "holdout: disabled by default (no-op)"        "$(HOLD)" 0
+GATE && ok "holdout: gate passes with holdout off" || no "holdout: gate passes with holdout off" "fail" "pass"
+
+# switched ON but not wired must FAIL — an oracle enabled and connected to nothing
+# reporting green is a worse lie than having no oracle at all
+printf 'HARNESS_HOLDOUT="on"\n' >> migration/harness.env
+chk "holdout: enabled but UNCONFIGURED fails"     "$(HOLD)" 1
+GATE && no "gates: unconfigured holdout fails the gate" "pass" "fail" || ok "gates: unconfigured holdout fails the gate"
+
+# wired and agreeing with the oracle
+wire_holdout 'true  # selftest: oracle and port agree'
+chk "holdout: wired + agreeing passes"            "$(HOLD)" 0
+GATE && ok "gates: wired holdout passes the gate" || no "gates: wired holdout passes the gate" "fail" "pass"
+
+# wired and DISAGREEING must fail the gate — this is the whole point
+wire_holdout 'exit 1  # selftest: port disagrees on unseen cases'
+chk "holdout: port disagreeing on unseen cases fails" "$(HOLD)" 1
+GATE && no "gates: holdout mismatch fails the gate" "pass" "fail" || ok "gates: holdout mismatch fails the gate"
+cd /; rm -rf "$R"
+
+# ==================================================== cross-model escalation
+# A fresh context of the SAME model is still the same model: the tick buys
+# independence from the conversation, not from the blind spot.
+R="$(mkrepo 'src')"; cd "$R"; mkdir -p .fakebin; FAKEBIN="$PWD/.fakebin"
+KL(){ ( PATH="$FAKEBIN:$PATH" bash migration/tools/kick-loop.sh "$@" ); }
+
+# A fake claude that records every --model it is invoked with, leaves a VALID gate
+# proof, and changes nothing in scope — so the tick is gate-covered (rc 0) but
+# idle. That combination is what the idle backstop and the escalation path key on;
+# a tick that leaves no proof exits 65 immediately and never reaches either.
+# .harness/ is outside HARNESS_SCOPE, so the bookkeeping file below is not progress.
+cat > "$FAKEBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+mkdir -p .harness/state
+m="(default)"
+while [ $# -gt 0 ]; do
+  case "$1" in --model) m="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '%s\n' "$m" >> .harness/state/models-used
+bash migration/tools/gates.sh >/dev/null 2>&1
+exit 0
+FAKE
+chmod +x "$FAKEBIN/claude"
+
+# escalation OFF (default): both ticks run on the session default, backstop at 64
+rm -f .harness/state/models-used
+KL --drive >/dev/null 2>&1; rc=$?
+chk "escalate: off by default — idle backstop still 64" "$rc" 64
+chk "escalate: off — no --model was passed" "$(sort -u .harness/state/models-used | tr -d '\n')" "(default)"
+
+# escalation ON: tick 1 idles -> tick 2 runs on the escalation model
+rm -f .harness/state/models-used
+printf 'HARNESS_ESCALATE_MODEL="opus"\n' >> migration/harness.env
+KL --drive >/dev/null 2>&1; rc=$?
+chk "escalate: on — still stops 64 when BOTH models idle" "$rc" 64
+chk "escalate: tick 1 on the default model" "$(sed -n 1p .harness/state/models-used)" "(default)"
+chk "escalate: tick 2 escalated to the other model" "$(sed -n 2p .harness/state/models-used)" "opus"
+
+# a productive tick resets the escalation — the next tick returns to the default
+rm -f .harness/state/models-used
+cat > "$FAKEBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+mkdir -p .harness/state
+m="(default)"
+while [ $# -gt 0 ]; do
+  case "$1" in --model) m="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '%s\n' "$m" >> .harness/state/models-used
+n=$(wc -l < .harness/state/models-used)
+# tick 2 (the escalated one) actually makes progress; every other tick idles
+[ "$n" -eq 2 ] && printf 'progress\n' > src/a.txt
+bash migration/tools/gates.sh >/dev/null 2>&1
+exit 0
+FAKE
+chmod +x "$FAKEBIN/claude"
+KL --drive --max 4 >/dev/null 2>&1
+chk "escalate: tick 2 escalated after the idle tick 1" "$(sed -n 2p .harness/state/models-used)" "opus"
+chk "escalate: tick 3 back to default after progress"  "$(sed -n 3p .harness/state/models-used)" "(default)"
+cd /; rm -rf "$R"
+
 echo "----------------------------------------"
 echo "harness self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

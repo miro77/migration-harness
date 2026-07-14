@@ -83,6 +83,13 @@ if [ "${HARNESS_ORACLE:-}" = "baselines" ]; then
 fi
 # ==========================================================================
 
+# Held-out parity (opt-in: HARNESS_HOLDOUT="on"). The committed fixtures are
+# visible to the agent that must satisfy them; these cases are generated from the
+# oracle at gate time, so they did not exist while the code was being written and
+# there was nothing to overfit to. No-op unless enabled.
+bash migration/tools/check-holdout.sh >&2 \
+  || fail "held-out parity (migration/tools/check-holdout.sh) — the port disagrees with the oracle on cases it had never seen, or the holdout oracle is enabled but not configured"
+
 # ===== PROJECT GATES (edit for your stack) ================================
 # Run format-check, static analysis, and the FULL test suite (including the
 # fixture/parity tests). Each must abort the script on failure. Examples:
