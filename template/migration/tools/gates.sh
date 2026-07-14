@@ -56,6 +56,13 @@ fi
 bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration >&2 \
   || fail "broken internal Markdown reference(s) in the harness docs (see above; re-run: bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration)"
 
+# Frozen-oracle integrity. The PreToolUse hooks block the ACTIONS that would edit
+# the oracle; this verifies the OUTCOME, so a subagent that never fired the parent
+# hooks, an interpreter write, or an odd path spelling cannot move the reference
+# behind the guards' back. No-op when HARNESS_FROZEN is empty (in-place profile).
+bash migration/tools/check-frozen.sh >&2 \
+  || fail "frozen oracle failed integrity check (migration/tools/check-frozen.sh) — the reference parity is measured against has moved, or was never baselined. No gate run is trustworthy until it is restored."
+
 # ===== IN-PLACE ORACLE GATES (opt-in: HARNESS_ORACLE="baselines") ==========
 # For in-place migrations (docs/IN-PLACE-PROFILE.md): validate the status
 # board mechanically and enforce the captured-baseline oracle. No-op unless

@@ -73,11 +73,26 @@ un-gated changes, and neither does deleting a scoped path. That, plus the
 git-visible audit trail and the fresh-context `parity-auditor`, is what makes a
 "done" claim trustworthy.
 
+The frozen oracle gets the same treatment, and for the same reason. The PreToolUse
+hooks block the *actions* that would edit it — but action interception is
+bypassable by construction (a subagent whose calls never fire the parent's hooks,
+an interpreter write, a path spelled to miss a substring match). So
+`migration/tools/check-frozen.sh` runs inside `gates.sh` and checks the *outcome*:
+it rebuilds the frozen fileset's content hash and compares it against the
+committed baseline in `migration/frozen-baseline.sha`. Any drift — an edit, an
+added file, a deletion, by any tool, committed or not — fails the gate. A human
+records that baseline once during bootstrap; the agent is blocked from
+`--record`ing it, because an agent that can move the reference can launder any
+drift it caused. **If the oracle can move, parity means nothing.**
+
 The PreToolUse hooks (frozen-legacy, command-guard) are **guard rails that keep an
 honest agent on the supported path — not an adversarial sandbox.** They match on
 command/path strings, which a determined process can obfuscate (variable
 indirection, interpreters, `cd` + relative paths). Do not treat them as a security
-boundary. Two consequences you must respect rather than route around:
+boundary. Note that "mutation" includes **deletion**: an enforcement file that is
+not on disk does not run, so `rm`, `git rm`, `git checkout --`, `git restore` and
+`chmod` on a locked path are blocked exactly like a write. Two consequences you
+must respect rather than route around:
 
 - The harness's own enforcement files — `migration/tools/`, `.claude/hooks/`,
   `.claude/settings*.json`, `migration/harness.env` — are **locked**
@@ -111,9 +126,12 @@ Beyond the between-slice boundaries (gates, proof, auditor), the harness has
 three PostToolUse controls that operate **inside** a single tick:
 
 - **Observability** — every tool call is logged as structured JSON to
-  `.harness/state/telemetry.ndjson` (timestamp, tool name, argument fingerprint).
-  This is the within-slice audit trail: what the model did, in what order, and
-  how often. Inspect it after a run to understand failure patterns or cost.
+  `.harness/state/telemetry.ndjson` (timestamp, run/session ID, tool name,
+  argument fingerprint). `kick-loop.sh` records each attempt's lifecycle and
+  classified outcome in `.harness/state/runs.ndjson`; the shared `run_id`
+  correlates both logs. This is the within-slice audit trail: what the model
+  did, in what order, and how often. Inspect it after a run to understand
+  failure patterns or cost.
 - **Call budget** — `HARNESS_MAX_CALLS_PER_TICK` (default 200) caps tool calls
   per session. When exceeded, a wrap-up warning is injected (not a hard kill —
   the model self-corrects). In `--drive` mode each tick is a fresh session, so

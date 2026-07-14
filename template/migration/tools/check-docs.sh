@@ -119,6 +119,7 @@ for f in "${MD[@]:-}"; do
     # .gitkeep, so a rename of the dir is still caught; only their contents are exempt.
     case "$tok" in
       migration/HANDOFF.md) continue ;;                    # written at termination
+      migration/frozen-baseline.sha) continue ;;           # recorded once at bootstrap
       migration/reference/*|migration/fixtures/*) continue ;;  # runtime-populated
     esac
     if ! printf '%s\n' "${TRACKED[@]}" | grep -qE "(^|/)$(esc "$tok")($|/)"; then

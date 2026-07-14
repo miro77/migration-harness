@@ -48,7 +48,12 @@ mkrepo(){
     # real gates the install wired. Anchoring on the sentinels (not the editable
     # `# ===` banners) survives a user's configured gates and any internal `# ===`.
     sed -i '/# HARNESS:PROJECT-GATES-START/,/# HARNESS:PROJECT-GATES-END/c\true  # selftest no-op gate' migration/tools/gates.sh
-    printf 'HARNESS_SCOPE="%s"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json .claude/settings.local.json migration/harness.env"\n' "$scope" > migration/harness.env
+    printf 'HARNESS_SCOPE="%s"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json .claude/settings.local.json migration/harness.env migration/frozen-baseline.sha"\n' "$scope" > migration/harness.env
+    # Record the frozen-oracle baseline, exactly as a human does once during
+    # bootstrap. Without it check-frozen.sh (and so gates.sh) fails closed — an
+    # unbaselined oracle is UNPROVEN, not a pass — and every gate test here would
+    # be failing for the wrong reason.
+    bash migration/tools/check-frozen.sh --record >/dev/null 2>&1
     git add -A; git commit -qm init
   )
   echo "$T"
@@ -938,6 +943,69 @@ chk "doctor: read-only (tree hash unchanged)" "$after" "$before"
 out="$(bash migration/tools/doctor.sh 2>&1)"
 has "placeholders : REMAIN" "$out" "doctor: lowercase shipped placeholders reported"
 has "legacy-runtime.md" "$out" "doctor: placeholder report names legacy-runtime.md"
+cd /; rm -rf "$R"
+
+# ==================================================== frozen-oracle integrity
+# OUTCOME-based: the gate does not care which tool moved the oracle, so the
+# documented PreToolUse bypasses (subagent hooks not firing, interpreter writes,
+# odd path spellings) cannot get past it.
+FZ(){ bash migration/tools/check-frozen.sh >/dev/null 2>&1; echo $?; }
+
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+chk "frozen-hash: intact oracle passes"           "$(FZ)" 0
+chk "guard: check-frozen --record is agent-blocked" "$(GUARD 'bash migration/tools/check-frozen.sh --record')" 2
+
+# drift, by every route a bypass would take
+printf 'class A{int x;}\n' > legacy/src/A.java
+chk "frozen-hash: edited oracle file fails"        "$(FZ)" 1
+# committing the drift must NOT launder it (the hash is content-only, HEAD-free)
+git add -A >/dev/null 2>&1; git commit -qm "sneak" >/dev/null 2>&1
+chk "frozen-hash: COMMITTED drift still fails"     "$(FZ)" 1
+# restoring the CONTENT restores the hash even though history now has two extra
+# commits — the proof is content-addressed, so neither committing nor reverting
+# is what matters, only what the bytes are
+printf 'class A{}\n' > legacy/src/A.java
+git add -A >/dev/null 2>&1; git commit -qm "restore" >/dev/null 2>&1
+chk "frozen-hash: restored oracle passes again"    "$(FZ)" 0
+
+# an ADDED file under the oracle is drift too — a "helper" in legacy/src is new
+# oracle behavior, and a naive "compare the files we know about" check misses it
+printf 'class B{}\n' > legacy/src/B.java
+chk "frozen-hash: ADDED oracle file fails"         "$(FZ)" 1
+rm -f legacy/src/B.java
+chk "frozen-hash: removing the addition passes"    "$(FZ)" 0
+
+# deletion
+rm -f legacy/src/A.java
+chk "frozen-hash: DELETED oracle file fails"       "$(FZ)" 1
+git checkout -- legacy/src/A.java 2>/dev/null
+chk "frozen-hash: restored deletion passes"        "$(FZ)" 0
+
+# the gate itself must refuse a drifted oracle
+printf 'class A{int y;}\n' > legacy/src/A.java
+GATE && no "gates: drifted oracle fails the gate" "pass" "fail" || ok "gates: drifted oracle fails the gate"
+git checkout -- legacy/src/A.java 2>/dev/null
+
+# baseline integrity: absent, untracked, and re-record are all refused.
+# Drop it from the INDEX as well as the worktree — mkrepo commits the baseline, so
+# merely deleting the file leaves it tracked and the untracked case never arises.
+git rm -q --cached migration/frozen-baseline.sha >/dev/null 2>&1
+rm -f migration/frozen-baseline.sha
+chk "frozen-hash: MISSING baseline fails (unproven, not a pass)" "$(FZ)" 1
+# an untracked baseline proves nothing — whoever can create the file picks the answer
+bash migration/tools/check-frozen.sh --record >/dev/null 2>&1
+chk "frozen-hash: UNCOMMITTED baseline fails"     "$(FZ)" 1
+git add migration/frozen-baseline.sha >/dev/null 2>&1
+git commit -qm baseline >/dev/null 2>&1
+chk "frozen-hash: committed baseline passes"      "$(FZ)" 0
+bash migration/tools/check-frozen.sh --record >/dev/null 2>&1
+chk "frozen-hash: --record refuses to overwrite"  "$?" 1
+
+# misconfiguration must not read as green
+sed -i 's|HARNESS_FROZEN="legacy/src"|HARNESS_FROZEN="no/such/path"|' migration/harness.env
+chk "frozen-hash: fragments matching NOTHING fail" "$(FZ)" 1
+sed -i 's|HARNESS_FROZEN="no/such/path"|HARNESS_FROZEN=""|' migration/harness.env
+chk "frozen-hash: empty HARNESS_FROZEN passes (in-place)" "$(FZ)" 0
 cd /; rm -rf "$R"
 
 echo "----------------------------------------"

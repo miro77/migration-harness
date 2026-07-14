@@ -127,6 +127,36 @@ not to also catch your new code — freeze `legacy/vendor/VendorLib`, not a bare
 that would also match a `.../include/vendor/` shim.) Freezing source is one
 implementation of "don't let the oracle drift," not the definition of it.
 
+### Guard the outcome, not the action
+
+A hook that blocks an *edit* answers "is this call allowed?" — and every way an
+agent gets around it is a way of not making that call. The bypasses are
+documented, not hypothetical: a subagent's tool calls may never fire the parent
+session's PreToolUse hooks; an interpreter (`python -c "open(...,'w')"`) is not
+the Write tool; a path can be spelled to miss a substring match. Chasing those is
+a regex arms race you lose slowly.
+
+So the oracle is *also* checked as an outcome. `check-frozen.sh` runs inside the
+gate, rebuilds the content hash of the frozen fileset, and compares it to a
+committed baseline. It never asks which tool ran, or whether a hook fired — only
+whether the reference still hashes to what it hashed at bootstrap. Edits, added
+files, deletions, mode changes, committed or not, by any route: all drift, all
+fail. One check retires every bypass at once, which is the same reason the Stop
+hook hashes `HARNESS_SCOPE` instead of trying to intercept every write.
+
+Two corollaries the design leans on. The baseline must be **committed** — an
+untracked baseline is authored by whoever wants an answer, so it proves nothing.
+And the agent must be blocked from **re-recording** it: an agent that can move the
+reference can bless its own drift, which is the same failure as editing the oracle,
+one level up. A human records it once, in the bootstrap window.
+
+The mirror-image hole is linkage. Freezing stops the agent editing the reference;
+it does not stop the *port* from calling it. A port that shells out to the legacy
+binary passes every fixture perfectly while having migrated nothing —
+[MirrorCode](https://arxiv.org/pdf/2606.30182) removes the reference entirely
+during scoring for exactly this reason. We cannot remove it (the fixtures need it),
+so `HARNESS_LINKAGE_SCAN` scans the target tree for a dependency back on the oracle.
+
 ## 5. One slice per pass
 
 Work is decomposed into a **parity matrix** of slices, and each pass migrates
@@ -217,11 +247,15 @@ turn, what may leave it, and who audits it. But a single tick can still fail
 no trace of what it did. Three PostToolUse controls operate **inside** a tick:
 
 - **Observability** (`posttooluse-telemetry.sh`) — every tool call is logged
-  as structured JSON to `.harness/state/telemetry.ndjson`. This is the
-  within-slice audit trail. The between-slice audit (the proof, the matrix)
-  answers "was this slice correct?"; the telemetry answers "what did the
-  model *do* inside the slice, and in what order?" Without it, a failed tick
-  is a black box.
+  as structured JSON to `.harness/state/telemetry.ndjson`. `kick-loop.sh` also
+  writes an append-only lifecycle journal to `.harness/state/runs.ndjson`: each
+  attempt gets `run.start` and `run.end` events with its outcome, exit code,
+  duration, tool-call count, and before/after content hashes. The shared
+  `run_id` ties tool events to the attempt that produced them; a start without
+  an end identifies a process that was interrupted. This is the within-slice
+  audit trail. The between-slice audit (the proof, the matrix) answers "was
+  this slice correct?"; the telemetry answers "what did the model *do* inside
+  the slice, and in what order?" Without it, a failed tick is a black box.
 - **Call budget** — `HARNESS_MAX_CALLS_PER_TICK` caps tool calls per session.
   When exceeded, a wrap-up warning is *injected* (not a hard kill). This is
   the "inject, don't kill" principle: the model gets a nudge and decides what
