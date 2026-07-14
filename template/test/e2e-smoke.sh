@@ -36,7 +36,13 @@ printf 'class A{}\n'  > legacy/src/A.java
 printf 'seed\n'       > src/a.txt
 printf 'placeholder\n'> CLAUDE.md
 printf '.harness/\n'  > .gitignore
-printf 'HARNESS_SCOPE="src"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json migration/harness.env"\n' > migration/harness.env
+printf 'HARNESS_SCOPE="src"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json migration/harness.env migration/frozen-baseline.sha"\n' > migration/harness.env
+
+# Baseline the frozen oracle, exactly as a human does once before slice 1. Without
+# it check-frozen.sh fails the gate closed — an unverified oracle is UNPROVEN, not
+# a pass — so this is part of a real bootstrap, not test scaffolding.
+bash migration/tools/check-frozen.sh --record >/dev/null 2>&1 \
+  || { echo "e2e SETUP FAILED: could not record the frozen-oracle baseline" >&2; exit 1; }
 
 # Wire a REAL gate: replace everything between the HARNESS:PROJECT-GATES markers
 # (ship-time stub or user-configured alike) with a genuine check that fails iff a
