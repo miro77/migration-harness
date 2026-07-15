@@ -44,13 +44,33 @@ FILES=()
 while IFS= read -r f; do FILES+=("$f"); done \
   < <(git ls-files -co --exclude-standard -- "${SCAN[@]}" 2>/dev/null | sort -u)
 
-# Ledger ids: the INTEG-<id> tokens in the ledger table.
-LEDGER_IDS=()
+# Ledger ids: TABLE ROWS' id column only, with their state. An id merely
+# MENTIONED in the ledger prose is not a registration, and the shipped
+# INTEG-example row never counts — it exists to show the format, and letting it
+# register real stubs would make copying the example tag onto every stub a
+# universal amnesty that terminates the migration COMPLETE with live
+# placeholders shipped (found by external review). The state matters too: a
+# sentinel still in shipped source while its row says `wired` is a
+# contradiction, not a registration. Header/column detection mirrors
+# check-audits.sh, so the legend table cannot donate rows.
+LEDGER_ROWS=""
 if [ -f "$ledger" ]; then
-  while IFS= read -r id; do LEDGER_IDS+=("$id"); done \
-    < <(grep -oE 'INTEG-[A-Za-z0-9_.-]+' "$ledger" 2>/dev/null | sort -u)
+  LEDGER_ROWS="$(awk -F'|' '
+    function trim(s){ gsub(/^[ \t`]+|[ \t`]+$/, "", s); return s }
+    /^\|/ {
+      n = split($0, c, "|")
+      if (col == 0) {
+        if (tolower(trim(c[2])) == "id")
+          for (i = 3; i <= n; i++) if (tolower(trim(c[i])) == "state") { col = i; break }
+        next
+      }
+      id = trim(c[2])
+      if (id !~ /^INTEG-/) next
+      print id "\t" trim(c[col])
+    }
+  ' "$ledger" 2>/dev/null)"
 fi
-has_id(){ printf '%s\n' "${LEDGER_IDS[@]:-}" | grep -qxF "$1"; }
+row_state(){ printf '%s\n' "$LEDGER_ROWS" | awk -F'\t' -v k="$1" '$1 == k { print $2; exit }'; }
 
 fails=0
 note(){ printf 'STUB: %s\n' "$1"; fails=$((fails+1)); }
@@ -63,8 +83,15 @@ for f in "${FILES[@]:-}"; do
     tag=$(printf '%s' "$text" | grep -oE 'INTEG-[A-Za-z0-9_.-]+' | head -n1)
     if [ -z "$tag" ]; then
       note "$f:$n  stub with no INTEG-<id> ledger tag — register it in $ledger and tag this line"
-    elif ! has_id "$tag"; then
-      note "$f:$n  references $tag, which is not a row in $ledger"
+    elif [ "$tag" = "INTEG-example" ]; then
+      note "$f:$n  tagged INTEG-example — the shipped format example never registers a real stub; add a real ledger row and tag this line with its id"
+    else
+      st="$(row_state "$tag")"
+      if [ -z "$st" ]; then
+        note "$f:$n  references $tag, which is not a table row in $ledger"
+      elif [ "$st" = "wired" ]; then
+        note "$f:$n  tagged $tag but that ledger row is 'wired' — a sentinel still in shipped source contradicts the row; wire the feature for real or reopen the row"
+      fi
     fi
   done < <(grep -nEI "$SENTINEL" "$f" 2>/dev/null)   # -I: a binary match would emit a garbage note line
 done

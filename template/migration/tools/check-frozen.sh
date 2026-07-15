@@ -122,7 +122,31 @@ if ! git ls-files --error-unmatch "$baseline" >/dev/null 2>&1; then
   exit 1
 fi
 
-want="$(tr -d '[:space:]' < "$baseline")"
+# Read the reference from GIT, never from the working tree. Trackedness alone
+# proves nothing about the working COPY: mutate the oracle by any of the hook
+# bypasses the header lists, write the drifted hash into the working-tree
+# baseline by the same route, and a working-tree read would report "intact" —
+# exactly the laundering this outcome check exists to catch. When HEAD has the
+# file, HEAD is the reference and ANY divergence of the index/working copy from
+# it is itself treated as tampering. During bootstrap (recorded and `git add`ed,
+# first commit not made yet) HEAD lacks it: accept the INDEX copy then, still
+# requiring the working copy to match the index.
+if git cat-file -e "HEAD:$baseline" 2>/dev/null; then
+  if ! git diff --quiet HEAD -- "$baseline" 2>/dev/null; then
+    echo "check-frozen: $baseline differs from its committed (HEAD) version." >&2
+    echo "  The committed baseline is the reference; an edited local copy is how oracle" >&2
+    echo "  drift gets laundered. Restore it: git checkout HEAD -- $baseline" >&2
+    exit 1
+  fi
+  want="$(git show "HEAD:$baseline" 2>/dev/null | tr -d '[:space:]')"
+else
+  if ! git diff --quiet -- "$baseline" 2>/dev/null; then
+    echo "check-frozen: $baseline is staged but the working copy differs from the index." >&2
+    echo "  Restore or re-stage it as a human before gating: git checkout -- $baseline" >&2
+    exit 1
+  fi
+  want="$(git show ":$baseline" 2>/dev/null | tr -d '[:space:]')"
+fi
 if [ "$current" != "$want" ]; then
   echo "check-frozen: FROZEN ORACLE HAS DRIFTED." >&2
   echo "  baseline: $want" >&2
@@ -156,9 +180,14 @@ if [ -n "${HARNESS_LINKAGE_SCAN:-}" ]; then
   for p in ${LSCAN[@]+"${LSCAN[@]}"}; do
     [ -e "$p" ] || continue
     for frag in "${FROZEN[@]}"; do
-      if grep -rInI -- "$frag" "$p" 2>/dev/null | head -5 | grep -q .; then
+      # Capture, THEN test. The obvious `grep -r | head -5 | grep -q .` is a
+      # false-pass generator under pipefail: with many matches head exits after
+      # 5 lines, grep -r dies of SIGPIPE (141), the pipeline is "false", and the
+      # MORE linkage there is the more likely the gate misses it (verified).
+      hits="$(grep -rInI -- "$frag" "$p" 2>/dev/null | head -5)" || true
+      if [ -n "$hits" ]; then
         echo "check-frozen: target tree '$p' references the frozen oracle ('$frag'):" >&2
-        grep -rInI -- "$frag" "$p" 2>/dev/null | head -5 | sed 's/^/    /' >&2
+        printf '%s\n' "$hits" | sed 's/^/    /' >&2
         echo "  A port that calls the oracle passes parity trivially without migrating" >&2
         echo "  anything. Remove the dependency, or narrow HARNESS_LINKAGE_SCAN." >&2
         lrc=1

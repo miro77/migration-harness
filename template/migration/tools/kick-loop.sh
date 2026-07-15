@@ -261,10 +261,15 @@ run_once(){
 
   # A usage-limit stop is a PAUSE, not a failure — but it only ever comes with a
   # NON-ZERO exit. Never classify an exit-0 run as rate-limited (its transcript
-  # may legitimately mention "rate limit"/"quota" as ordinary content).
+  # may legitimately mention "rate limit"/"quota" as ordinary content). The
+  # phrases are deliberately ANCHORED ("<kind> limit", not bare "limit reached"
+  # or "resets at"): a real failure whose transcript happens to say "reset at"
+  # (a test log, a stack trace) classified as 75 makes the scheduler retry a
+  # broken run forever, silently. A missed limit phrase errs the other way —
+  # a noisy cli_error stop a human sees — which is the safer direction.
   final_rc="$rc"; outcome="cli_error"
   if [ "$rc" -ne 0 ]; then
-    if printf '%s' "$out" | grep -qiE 'usage limit|rate limit|quota (exceeded|reached)|limit reached|resets? (at|in)|out of (tokens|credits)'; then
+    if printf '%s' "$out" | grep -qiE '(usage|rate|[0-9]+-hour|weekly|session) limit|quota (exceeded|reached)|out of (tokens|credits)'; then
       echo "kick-loop: hit a usage limit — the next scheduled run after reset will continue."
       final_rc=75; outcome="usage_limit"
     else

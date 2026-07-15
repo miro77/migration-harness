@@ -99,7 +99,11 @@ hash_commit(){
 }
 
 checkpoint_subject_ok(){
-  printf '%s\n' "$1" | grep -Eq '^migrate [A-Za-z0-9._-]+: (audited-fail|split into sub-slices)([[:space:]]|$)'
+  # Both profiles' subject conventions qualify: `migrate <id>: ...` (migration
+  # profile, CLAUDE.md rule 9) and `feat <id>: ...` (feature profile,
+  # CLAUDE-feature.md rule 9) — a compliant feature-profile checkpoint must not
+  # be classified un-gated just for its prefix.
+  printf '%s\n' "$1" | grep -Eq '^(migrate|feat) [A-Za-z0-9._-]+: (audited-fail|split into sub-slices)([[:space:]]|$)'
 }
 
 checkpoint_paths_ok(){
@@ -139,7 +143,7 @@ paths, and the case where no proof exists yet). Run:
 Fix any failures, update migration/parity-matrix.md, then finish. If this is a
 deliberately recorded audited-fail or row-split checkpoint, it is allowed only
 when the parent tree was gated, the subject is `migrate <id>: audited-fail` or
-`migrate <id>: split into sub-slices`, and the commit touches only migration
-bookkeeping.
+`migrate <id>: split into sub-slices` (`feat <id>: ...` in the feature
+profile), and the commit touches only migration bookkeeping.
 MSG
 exit 2

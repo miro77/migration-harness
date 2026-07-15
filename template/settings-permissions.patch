@@ -1,7 +1,7 @@
---- a/template/.claude/settings.json
-+++ b/template/.claude/settings.json
-@@ -7,7 +7,14 @@
-       "Bash(bash migration/tools/check-docs.sh:*)",
+--- a/.claude/settings.json
++++ b/.claude/settings.json
+@@ -11,7 +11,14 @@
+       "Bash(bash migration/tools/working-tree-hash.sh:*)",
        "Bash(bash migration/tools/persist-state.sh:*)",
        "Bash(bash migration/tools/read-state.sh:*)",
 -      "Bash(bash migration/tools/benchmark.sh:*)"

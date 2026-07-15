@@ -47,8 +47,11 @@ closes it. Closing a ledger row (wiring the feature) is a full unit of slice wor
 
 When `STUB_SENTINEL` is configured in [`harness.env`](harness.env), every
 occurrence of the stub sentinel in shipped source MUST carry its ledger id as an
-`INTEG-...` tag in a same-line comment, and that id must appear in the table
-below. `bash migration/tools/check-stubs.sh` (run by `gates.sh`) fails otherwise
+`INTEG-...` tag in a same-line comment, and that id must be a **table row**
+below (an id mentioned only in prose does not count, the shipped
+`INTEG-example` row never counts, and a row whose state is `wired` cannot cover
+a sentinel still in the source — that contradiction fails the gate too).
+`bash migration/tools/check-stubs.sh` (run by `gates.sh`) fails otherwise
 — so a stub cannot be shipped without being registered here. A single generic
 "not implemented" fallback that covers many commands should carry one `INTEG-...`
 tag pointing at a ledger row whose notes enumerate the still-stubbed commands.

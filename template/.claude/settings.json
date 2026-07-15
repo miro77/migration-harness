@@ -5,6 +5,10 @@
       "Bash(bash migration/tools/kick-loop.sh:*)",
       "Bash(bash migration/tools/doctor.sh:*)",
       "Bash(bash migration/tools/check-docs.sh:*)",
+      "Bash(bash migration/tools/check-frozen.sh:*)",
+      "Bash(bash migration/tools/check-complete.sh:*)",
+      "Bash(bash migration/tools/record-audit.sh:*)",
+      "Bash(bash migration/tools/working-tree-hash.sh:*)",
       "Bash(bash migration/tools/persist-state.sh:*)",
       "Bash(bash migration/tools/read-state.sh:*)",
       "Bash(bash migration/tools/benchmark.sh:*)"

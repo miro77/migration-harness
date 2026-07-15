@@ -47,13 +47,15 @@ case "$norm" in
     ;;
 esac
 
-# The gate proof is written only by gates.sh on a real pass — never by hand.
-# Match on the (unique) filename so dot-segment path variants
-# (.harness/./state/..., .../state/../state/...) can't slip past. Enforced
-# regardless of HARNESS_FROZEN/HARNESS_LOCKED so an empty config never reopens it.
+# The gate-proof state — the content hash AND the board snapshots
+# (gates-passed.*) that check-audits.sh compares against — is written only by
+# gates.sh on a real pass, never by hand. Match on the (unique) filename prefix
+# so dot-segment path variants (.harness/./state/..., .../state/../state/...)
+# can't slip past. Enforced regardless of HARNESS_FROZEN/HARNESS_LOCKED so an
+# empty config never reopens it.
 case "$norm" in
-  *gates-passed.diffsha)
-    echo "Blocked: the gate proof (.harness/state/gates-passed.diffsha) is written only by gates.sh on a successful run — don't edit it directly. Run: bash migration/tools/gates.sh" >&2
+  *gates-passed.*)
+    echo "Blocked: gate-proof state (.harness/state/gates-passed.*) is written only by gates.sh on a successful run — don't edit it directly. Run: bash migration/tools/gates.sh" >&2
     exit 2 ;;
 esac
 

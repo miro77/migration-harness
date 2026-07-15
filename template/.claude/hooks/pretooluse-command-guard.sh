@@ -23,16 +23,30 @@ if printf '%s' "$cmd" | grep -Eq 'record-g[^[:space:];|&<>]*\.sh'; then
   block "Blocked: record-gates.sh writes the gate proof and must only be called by gates.sh after the gates actually pass. Run: bash migration/tools/gates.sh"
 fi
 
-# Block WRITES to the proof file. Detection is intentionally CONSERVATIVE: any
-# write operator anywhere in a command that also names the proof file is blocked,
-# including one inside quotes — this is what catches a nested write such as
-# `bash -c "echo x > <proof>"`. The cost is that a read whose argument contains a
-# literal '>' (e.g. `grep '>' <proof>`) is also blocked; that over-block is an
-# acceptable trade against letting a real write slip through. Plain reads
-# (`cat <proof>`, `grep foo <proof>`) contain no write operator and pass.
-if printf '%s' "$cmd" | grep -q 'gates-passed\.diffsha' \
-   && printf '%s' "$cmd" | grep -Eq '(>|\btee\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|\bln\b|\btruncate\b|\bsed\b[[:space:]]+(-i|--in-place))'; then
-  block "Blocked: writing the gate proof file directly. It is written only by gates.sh on a real pass. Run: bash migration/tools/gates.sh"
+# Block WRITES to (and, since the board snapshots joined the proof, DELETION
+# of) the gate-proof state. The 'gates-passed' prefix covers the content hash
+# (gates-passed.diffsha) AND the board snapshots (gates-passed.parity-matrix.md
+# / .spec-matrix.md) that check-audits.sh compares against — deleting a
+# snapshot would drop check-audits back to its trust-HEAD bootstrap fallback,
+# which commit-then-gate can launder. Detection is intentionally CONSERVATIVE:
+# any write/delete operator anywhere in a command that also names the proof
+# state is blocked, including one inside quotes — this is what catches a nested
+# write such as `bash -c "echo x > <proof>"`. The cost is that a read whose
+# argument contains a literal '>' (e.g. `grep '>' <proof>`) is also blocked;
+# that over-block is an acceptable trade against letting a real write slip
+# through. Plain reads (`cat <proof>`, `grep foo <proof>`) pass.
+if printf '%s' "$cmd" | grep -q 'gates-passed' \
+   && printf '%s' "$cmd" | grep -Eq '(>|\btee\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|\bln\b|\btruncate\b|\brm\b|\bunlink\b|\bshred\b|\bsed\b[[:space:]]+(-i|--in-place))'; then
+  block "Blocked: writing or deleting gate-proof state (gates-passed.*) directly. It is written only by gates.sh on a real pass. Run: bash migration/tools/gates.sh"
+fi
+
+# Deleting the local state ROOT is the wholesale version of the same laundering:
+# wipe .harness/state (audit records + gate proof + board snapshots) and both
+# check-audits and the Stop hook fall back to their trust-committed-history
+# bootstrap paths. Only the roots are blocked — deleting a single bookkeeping
+# file the prompts own (.harness/state/idle-ticks) stays allowed.
+if printf '%s' "$cmd" | grep -Eq "\b(rm|unlink|shred|mv)\b[^|;&]*\.harness(/state)?/?([[:space:]'\"]|\$)"; then
+  block "Blocked: deleting the harness state root (.harness or .harness/state). It holds the gate proof, the board snapshots, and the audit records — wiping it resets the harness to its trust-committed-history bootstrap, which launders un-audited claims. Delete specific bookkeeping files (e.g. .harness/state/idle-ticks) instead."
 fi
 
 # Same for the audit records. An audit record says a fresh-context auditor read
@@ -65,9 +79,11 @@ fi
 # co-occurrence match is fine), locked TOOLING is legitimately run and read:
 # `bash migration/tools/gates.sh`, `cat`/`grep` must stay allowed. So detection
 # is TARGET-AWARE — a protected path is blocked only when it is a redirection
-# target or an argument to a mutating verb, not merely present. `[^|;&<>]` keeps
-# each match inside one command segment so an unrelated later command isn't
-# implicated. A read whose ARGUMENTS happen to contain a verb word (`grep -r rm
+# target or an argument to a mutating verb, not merely present. A negated
+# separator class keeps each match inside one command segment so an unrelated
+# later command isn't implicated (`[^|;&<>]` after a redirection operator,
+# where <> would start a new redirection; `[^|;&]` after a verb, where a
+# redirection between verb and path is still the same segment). A read whose ARGUMENTS happen to contain a verb word (`grep -r rm
 # migration/tools/`) is over-blocked; that trade is deliberate and matches the
 # existing tee/cp/mv posture — a false block stalls one call, a missed mutation
 # silently voids every proof that follows.
@@ -124,6 +140,22 @@ fi
 
 if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^;&|]*\bcommit\b[^;&|]*([[:space:]]-a\b|[[:space:]]-am\b|[[:space:]]--all\b)'; then
   block "Blocked: git commit -a stages all tracked edits. git add the explicit slice files, then commit. Tip: a message that must MENTION staging flags goes in a file (git commit -F <file>)."
+fi
+
+# --- Pathless tree-wide reverts (universal) ---------------------------------
+# The HARNESS_LOCKED/HARNESS_FROZEN blocks above are TARGET-AWARE: they fire
+# only when a protected path is NAMED in the command. `git checkout -- .`,
+# `git restore .` and `git clean -f` mutate those same paths without naming
+# any of them — and, mid-slice, destroy uncommitted work tree-wide (the exact
+# orphan-writer incident SINGLE-TICK-PROMPT.md step 0 recounts). Branch
+# switches (`git checkout <branch>`) and explicit-path reverts stay allowed:
+# only the whole-tree pathspecs ('.', ':/') and clean -f are blocked. Uses
+# cmd_noq so a commit MESSAGE mentioning these does not false-positive.
+if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^|;&]*\b(checkout|restore)\b[^|;&]*[[:space:]](\.|:/)([[:space:]]|$)'; then
+  block "Blocked: tree-wide revert (git checkout/restore of '.' or ':/'). It silently mutates locked enforcement files and the frozen oracle without naming them, and destroys any other writer's uncommitted work. Revert the EXPLICIT paths of this slice instead."
+fi
+if printf '%s' "$cmd_noq" | grep -Eq '\bgit\b[^|;&]*\bclean\b[^|;&]*[[:space:]]-[A-Za-z]*f'; then
+  block "Blocked: git clean -f deletes untracked files tree-wide — including another writer's in-flight work and any not-yet-committed harness files. Delete the explicit paths you mean instead (rm <path>)."
 fi
 
 # --- Project-specific guards (edit for your stack) ------------------------
