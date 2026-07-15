@@ -1322,6 +1322,93 @@ chk "guard: explicit-path restore allowed"         "$(GUARD 'git checkout -- src
 chk "guard: git clean dry-run allowed"             "$(GUARD 'git clean -nd')" 0
 cd /; rm -rf "$R"
 
+# ==================================================== doc-gate: fence + anchor fidelity
+# CommonMark fences and GitHub anchors the naive ```-toggle/bare-slug scanner
+# got wrong (found by cross-vendor review): ~~~ fences, a 4-backtick fence
+# showing a ```-example, duplicate headings (GitHub suffixes -1/-2), and an
+# em-dash heading. The unicode heading is lowercase on purpose — tolower() on
+# multibyte is gawk-only, and the gate must behave the same under mawk.
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+DOCS(){ bash migration/tools/check-docs.sh docs-probe.md >/dev/null 2>&1; echo $?; }
+cat > docs-probe.md <<'EOF'
+# Alpha — Beta
+
+~~~
+[not a real link](missing.md)
+# not a heading
+~~~
+
+````
+```
+[shown as an example](nope.md)
+```
+````
+
+## Setup
+## Setup
+### δοκιμή
+
+[dash](#alpha--beta) [dup-first](#setup) [dup-second](#setup-1) [greek](#δοκιμή)
+EOF
+chk "docs: tilde/nested fences and dup/em-dash/unicode anchors resolve" "$(DOCS)" 0
+printf '[overclaimed](#setup-2)\n' >> docs-probe.md
+chk "docs: anchor for a third duplicate that does not exist fails" "$(DOCS)" 1
+sed -i 's/\[overclaimed\](#setup-2)/[broken](gone.md)/' docs-probe.md
+chk "docs: broken link outside a fence still fails" "$(DOCS)" 1
+cd /; rm -rf "$R"
+
+# ==================================================== benchmark: arm isolation
+# The A/B comparison is meaningless if one arm can see the other's leftovers.
+# A fake CLI records what each arm could observe: arm B plants a marker in
+# .harness/state (which the driver must wipe between arms), and checks that
+# its own environment really is de-harnessed (no hooks in settings.json, no
+# CLAUDE.md, no settings.local.json override).
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+T2="$(mktemp -d)"; FAKEBIN="$T2"
+cat > "$FAKEBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+here="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p .harness/state
+case "$*" in
+  *"Advance the migration"*)   # arm A (with harness) — runs after arm B
+    [ -e .harness/state/leaked-from-b ] && touch "$here/state-contaminated"
+    ;;
+  *)                           # arm B (without harness)
+    touch .harness/state/leaked-from-b
+    grep -qs '"hooks"' .claude/settings.json && touch "$here/b-still-hooked"
+    [ -f CLAUDE.md ] && touch "$here/b-claude-md-present"
+    [ -f .claude/settings.local.json ] && touch "$here/b-local-settings-present"
+    ;;
+esac
+exit 0
+FAKE
+chmod +x "$FAKEBIN/claude"
+printf '{"permissions":{"allow":[]}}\n' > .claude/settings.local.json
+git add .claude/settings.local.json >/dev/null 2>&1
+git commit -qm local-settings >/dev/null 2>&1
+PATH="$FAKEBIN:$PATH" bash migration/tools/benchmark.sh S01 >/dev/null 2>&1; brc=$?
+chk "benchmark: run with fake CLI exits 0" "$brc" 0
+[ ! -e "$FAKEBIN/state-contaminated" ] \
+  && ok "benchmark: arm A does not inherit arm B's .harness/state" \
+  || no "benchmark: arm A does not inherit arm B's .harness/state" "contaminated" "clean"
+[ ! -e "$FAKEBIN/b-still-hooked" ] \
+  && ok "benchmark: B arm settings.json really is hookless" \
+  || no "benchmark: B arm settings.json really is hookless" "hooked" "hookless"
+[ ! -e "$FAKEBIN/b-claude-md-present" ] \
+  && ok "benchmark: B arm has CLAUDE.md parked" \
+  || no "benchmark: B arm has CLAUDE.md parked" "present" "parked"
+[ ! -e "$FAKEBIN/b-local-settings-present" ] \
+  && ok "benchmark: B arm has settings.local.json parked" \
+  || no "benchmark: B arm has settings.local.json parked" "present" "parked"
+grep -q '"hooks"' .claude/settings.json \
+  && ok "benchmark: settings.json restored after the run" \
+  || no "benchmark: settings.json restored after the run" "hookless" "restored"
+{ [ -f CLAUDE.md ] && [ -f .claude/settings.local.json ]; } \
+  && ok "benchmark: parked files restored after the run" \
+  || no "benchmark: parked files restored after the run" "missing" "restored"
+rm -rf "$T2"; T2=""
+cd /; rm -rf "$R"
+
 echo "----------------------------------------"
 echo "harness self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

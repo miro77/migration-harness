@@ -107,7 +107,7 @@ exit non-zero on any failure.
 Then verify the plumbing:
 
 ```bash
-bash migration/tools/gates.sh          # should run your gates and record proof
+bash migration/tools/gates.sh          # runs your gates; records proof once steps 3 and 6 are also done
 cat .harness/state/gates-passed.diffsha # a hash appears on success
 ```
 
@@ -235,7 +235,7 @@ To verify the harness itself, run the full local test suite — syntax +
 shellcheck + the runtime regression guard (content-addressed proof, the
 Stop-hook challenge, the frozen/command/locked guards) + static consistency
 checks + an end-to-end smoke test that installs the harness and drives a real
-gate through pass/fail/re-gate. Needs only bash + git:
+gate through pass/fail/re-gate. Needs bash ≥ 4, git, and GNU sed (see below):
 
 ```bash
 bash test/run-all.sh

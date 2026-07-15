@@ -51,19 +51,40 @@ done
 case "$rounds" in ''|*[!0-9]*|0) echo "benchmark: --rounds needs a positive integer" >&2; exit 2 ;; esac
 
 sj=.claude/settings.json
-# Path-local mutations (the hooks-free settings.json, the parked CLAUDE.md)
-# are backed up under .harness: it is outside the proof hash, gitignored by
-# the installer, and — critically — SURVIVES the `git clean -fd` between
-# paths (clean without -x skips ignored paths; the explicit -e is belt and
-# braces for repos that never gitignored .harness).
+slj=.claude/settings.local.json
+# Path-local mutations (the hooks-free settings.json, the parked local
+# overrides and CLAUDE.md) are backed up under .harness: it is outside the
+# proof hash, gitignored by the installer, and — critically — SURVIVES the
+# `git clean -fd` between paths (clean without -x skips ignored paths; the
+# explicit -e is belt and braces for repos that never gitignored .harness).
 mkdir -p .harness
 sj_backup=".harness/benchmark-settings.json.bak"
+slj_backup=".harness/benchmark-settings.local.json.bak"
 cm_backup=".harness/benchmark-CLAUDE.md.bak"
+cml_backup=".harness/benchmark-CLAUDE.local.md.bak"
+state_orig=".harness/benchmark-state-orig"
 restore_all(){
   if [ -f "$sj_backup" ]; then mv -f "$sj_backup" "$sj"; echo "benchmark: restored $sj" >&2; fi
+  if [ -f "$slj_backup" ]; then mv -f "$slj_backup" "$slj"; echo "benchmark: restored $slj" >&2; fi
   if [ -f "$cm_backup" ]; then mv -f "$cm_backup" CLAUDE.md; echo "benchmark: restored CLAUDE.md" >&2; fi
+  if [ -f "$cml_backup" ]; then mv -f "$cml_backup" CLAUDE.local.md; echo "benchmark: restored CLAUDE.local.md" >&2; fi
 }
 trap restore_all EXIT
+
+# Hooks the harness cannot disable for the B arm: Claude Code also loads user
+# (~/.claude/settings.json), managed, and plugin settings — outside this repo,
+# so outside this script's remit. Warn instead of silently mislabeling the arm.
+if grep -qs '"hooks"' "$HOME/.claude/settings.json" 2>/dev/null; then
+  echo "benchmark: WARNING — user-level hooks exist in ~/.claude/settings.json; the 'WITHOUT HARNESS' arm cannot disable those." >&2
+fi
+
+# Snapshot the pre-benchmark local harness state ONCE. Each arm then starts
+# from this snapshot: .harness/state carries the gate proof, board snapshots,
+# audit records and gate-failure feedback, and letting arm B's state leak into
+# arm A contaminates the comparison exactly like leaked source files would
+# (confirmed: A's gate verdict could be decided by B's leftovers).
+rm -rf "$state_orig"
+[ -d .harness/state ] && cp -R .harness/state "$state_orig"
 
 # One benchmark run: reset the tree, apply the path's enforcement mode, run
 # the model, then gate. Stdout is ONLY the machine-readable verdict; the
@@ -71,16 +92,21 @@ trap restore_all EXIT
 run_path(){
   local label="$1" prompt="$2" nohooks="$3"
   echo "=== $label ===" >&2
-  # Reset BOTH tracked and untracked state so this path cannot inherit the
-  # other path's work (GATE:PASS earned by the other path's files is the
-  # exact contamination this script exists to rule out).
+  # Reset tracked, untracked, AND local harness state so this path cannot
+  # inherit the other path's work (a GATE verdict earned by the other path's
+  # files — or its recorded proof/audit state — is the exact contamination
+  # this script exists to rule out).
   git reset --hard "$save_head" >/dev/null 2>&1
   git clean -fdq -e .harness >/dev/null 2>&1 || true
+  rm -rf .harness/state
+  [ -d "$state_orig" ] && cp -R "$state_orig" .harness/state
   rm -rf .harness/state/tool-stats 2>/dev/null || true
   # Enforcement swap AFTER the reset: settings.json is tracked, so a reset
   # inside this function after the swap would silently restore the hooks and
   # run the "without" path WITH them (the A/B was A/A; found by external
-  # review).
+  # review). settings.local.json and CLAUDE.local.md are parked too — local
+  # settings OVERRIDE project settings, so leaving them in place can keep the
+  # "without" arm hooked (or contracted) despite the swapped settings.json.
   if [ "$nohooks" = "nohooks" ]; then
     cp "$sj" "$sj_backup"
     cat > "$sj" <<'NOHOOKS'
@@ -92,7 +118,9 @@ run_path(){
   }
 }
 NOHOOKS
+    if [ -f "$slj" ]; then mv "$slj" "$slj_backup"; fi
     if [ -f CLAUDE.md ]; then mv CLAUDE.md "$cm_backup"; fi
+    if [ -f CLAUDE.local.md ]; then mv CLAUDE.local.md "$cml_backup"; fi
   fi
   claude -p "$prompt" >&2 2>&1 || true
   # Restore enforcement BEFORE gating so both paths are judged by the same
@@ -126,9 +154,11 @@ while [ "$r" -le "$rounds" ]; do
   r=$((r+1))
 done
 
-# --- Reset to the original tree ---
+# --- Reset to the original tree and pre-benchmark harness state ---
 git reset --hard "$save_head" >/dev/null 2>&1
 git clean -fdq -e .harness >/dev/null 2>&1 || true
+rm -rf .harness/state
+[ -d "$state_orig" ] && mv "$state_orig" .harness/state
 
 # --- Print comparison ---
 echo

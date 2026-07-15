@@ -22,14 +22,38 @@ note(){ printf 'BROKEN: %s\n' "$1"; fails=$((fails+1)); }
 # except space/underscore/hyphen, then EACH space becomes its own hyphen —
 # GitHub's slugger does not collapse runs, so "A — B" slugs to a--b, not a-b
 # (the em-dash is dropped and both surrounding spaces survive as hyphens).
-slug(){ printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/`//g; s/[^a-z0-9 _-]//g; s/ /-/g'; }
+# [:alnum:] instead of a-z0-9 keeps non-ASCII letters (GitHub preserves them)
+# in any multibyte locale; awk tolower() lowercases them too where the awk is
+# locale-aware (gawk) and degrades to ASCII-only lowering elsewhere — a
+# best-effort that never REJECTS more than the old ASCII slugger did.
+slug(){ printf '%s\n' "$1" | awk '{ print tolower($0) }' \
+  | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/`//g; s/[^[:alnum:] _-]//g; s/ /-/g'; }
 
-# Drop fenced ``` blocks. Shared by the link, anchor, and inline-span scans:
+# Drop fenced code blocks. Shared by the link, anchor, and inline-span scans:
 # content inside a fence is illustrative (an example link is not a reference,
-# a "# comment" in a shell example is not a heading).
-strip_fences(){ awk '/^[[:space:]]*```/ { fence = 1 - fence; next } !fence' "$1" 2>/dev/null; }
+# a "# comment" in a shell example is not a heading). CommonMark rules, not a
+# naive ``` toggle: a fence opens with 3+ backticks OR tildes, and closes only
+# on a run of the SAME character AT LEAST as long with nothing else on the
+# line — so a ~~~ block hides its contents, and a ````-outer fence showing a
+# ```-inner example does not flip state mid-block (both were false fails).
+strip_fences(){ awk '
+  {
+    l = $0; sub(/^[[:space:]]+/, "", l)
+    if (!infence) {
+      if (match(l, /^```*/) && RLENGTH >= 3) { fc = "`"; flen = RLENGTH; infence = 1; next }
+      if (match(l, /^~~~*/) && RLENGTH >= 3) { fc = "~"; flen = RLENGTH; infence = 1; next }
+      print; next
+    }
+    if (fc == "`" && l ~ /^``*[[:space:]]*$/ && match(l, /^``*/) && RLENGTH >= flen) { infence = 0; next }
+    if (fc == "~" && l ~ /^~~*[[:space:]]*$/ && match(l, /^~~*/) && RLENGTH >= flen) { infence = 0; next }
+    next
+  }' "$1" 2>/dev/null; }
 
-anchors_of(){ strip_fences "$1" | grep -E '^#{1,6}[[:space:]]' | sed -E 's/^#+[[:space:]]+//' | while IFS= read -r h; do slug "$h"; done; }
+# Duplicate headings get GitHub'\''s -1/-2/... suffixes (the first occurrence
+# keeps the bare slug), so a link to the second "## Setup" as #setup-1 resolves.
+anchors_of(){ strip_fences "$1" | grep -E '^#{1,6}[[:space:]]' | sed -E 's/^#+[[:space:]]+//' \
+  | while IFS= read -r h; do slug "$h"; done \
+  | awk '{ n = seen[$0]++; print (n ? $0 "-" n : $0) }'; }
 
 # Lexically resolve . and .. in a path (no filesystem access).
 norm(){ printf '%s' "$1" | awk -F/ '{n=0;for(i=1;i<=NF;i++){s=$i;
