@@ -6,7 +6,7 @@ try {
     $root = Get-HarnessRoot -StartPath $PSScriptRoot
     $bash = Get-HarnessBash
     Push-Location $root
-    try { & $bash --login -c 'exec "$@"' harness 'migration/tools/gates.sh' @args; $code = $LASTEXITCODE } finally { Pop-Location }
+    try { Invoke-HarnessBash -Bash $bash -Command (@('migration/tools/gates.sh') + $args); $code = $LASTEXITCODE } finally { Pop-Location }
     exit $code
 }
 catch {

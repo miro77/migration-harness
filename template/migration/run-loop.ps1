@@ -82,8 +82,36 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repo = (& git rev-parse --show-toplevel 2>$null)
-if (-not $repo) { Write-Error 'not a git repository'; exit 2 }
+# Shared bash-bridge helpers (Invoke-HarnessBash: argument quoting that
+# survives PS 5.1's naive native re-quoting). Bash RESOLUTION stays local
+# below on purpose: Get-HarnessBash accepts any MSYS/Linux bash, while this
+# supervisor deliberately refuses anything that is not Git Bash.
+. (Join-Path $PSScriptRoot 'tools/_git-bash.ps1')
+
+# Windows PowerShell 5.1 turns a REDIRECTED stderr line from a native command
+# into a TERMINATING error while $ErrorActionPreference is 'Stop' (this
+# script's default) — one `fatal:` line from git would abort the whole
+# supervisor before its retry/terminal-state logic ever ran. Every native call
+# that redirects stderr goes through this guard.
+function Invoke-Native([scriptblock] $Native) {
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Native } finally { $ErrorActionPreference = $previousPreference }
+}
+
+# HEAD is unborn in a freshly `git init`-ed repo (zero commits). Two traps:
+# a bare `git rev-parse HEAD` used to hand .Trim() a $null (crash), and it
+# also echoes the literal string "HEAD" to STDOUT while failing — so the
+# output alone cannot be trusted; --verify plus the exit code can. Empty
+# string means "no commits yet" — callers decide what that means.
+function Get-HeadCommit {
+    $head = Invoke-Native { & git rev-parse --verify HEAD 2>$null }
+    if ($LASTEXITCODE -eq 0 -and $head) { return ([string]$head).Trim() }
+    return ''
+}
+
+$repo = Invoke-Native { & git rev-parse --show-toplevel 2>$null }
+if (-not $repo) { [Console]::Error.WriteLine('run-loop: not a git repository'); exit 2 }
 Set-Location $repo
 $log = Join-Path $repo '.harness\run-loop.log'
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
@@ -110,7 +138,7 @@ function Write-TickPrompt {
 
 function Exit-ExistingHandoff {
     Say 'migration/HANDOFF.md is present -- validating terminal state.' 'Yellow'
-    $ccout = @(& $bash --login -c 'exec "$@"' harness 'migration/tools/check-complete.sh' 2>&1)
+    $ccout = @(Invoke-HarnessBash -Bash $bash -Command @('migration/tools/check-complete.sh') -MergeStderr)
     $ccrc = $LASTEXITCODE
     foreach ($line in $ccout) { Say "    $line" 'Gray' }
     if ($ccrc -ne 0) {
@@ -135,17 +163,24 @@ function Exit-ExistingHandoff {
 
 # --- orphan reaping: the reason this script exists --------------------------------
 function Get-HeadlessTicks {
-    # The driver's tick is `claude.exe -p "<repo marker>...# Single-Tick Prompt ..."`.
+    # The driver's tick is `claude -p "<repo marker>...# Single-Tick Prompt ..."`.
     # Match -p, the tick marker, AND this repo's marker, so we can never kill:
-    #   * the human's interactive session (`claude.exe --session-id ...`), nor
+    #   * the human's interactive session (`claude --session-id ...`), nor
     #   * an unrelated headless `claude -p` the human is running for something else,
     #   * another checkout running the same harness prompt.
     # A bare `-p` match would do the first two. The generic prompt heading alone
     # would do the third.
+    #
+    # Process NAME depends on how the CLI was installed: the native installer
+    # runs as claude.exe, but an npm install is a shim whose real process is
+    # node.exe (with the cli script + the full prompt on its command line).
+    # Matching claude.exe alone silently missed npm installs — the reaper found
+    # nothing while an orphaned tick kept writing the tree. The marker checks
+    # below keep the wider name filter exactly as narrow as before.
     $pFlag = '(^|\s)-p(\s|$)'
     $tick = [Regex]::Escape($script:TickMarker)
     $repoMarker = [Regex]::Escape($script:PromptMarker)
-    Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Filter "Name='claude.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             $_.CommandLine -and
             $_.CommandLine -match $pFlag -and
@@ -173,8 +208,12 @@ Say '--- preflight ---------------------------------------------------------' 'C
 
 # `bash` on Windows is usually WSL. Resolve GIT BASH explicitly and refuse anything
 # else -- a silent WSL fallback reports "claude not on PATH", which misdiagnoses it.
+# Get-Command needs -ErrorAction SilentlyContinue: with no git at all it would
+# otherwise THROW under this script's EAP=Stop, and the diagnostic below (the
+# whole reason this preflight exists) would never print.
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
 $bash = @(
-    (Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'bin\bash.exe'),
+    $(if ($gitCmd -and $gitCmd.Source) { Join-Path (Split-Path (Split-Path $gitCmd.Source)) 'bin\bash.exe' }),
     'C:\Program Files\Git\bin\bash.exe',
     'C:\Program Files (x86)\Git\bin\bash.exe'
 ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
@@ -184,7 +223,7 @@ if (-not $bash) {
     Say 'The harness needs Git Bash (MINGW64); WSL cannot see claude.exe.' 'Red'
     exit 2
 }
-$uname = (& $bash --login -c 'exec uname -s') 2>$null
+$uname = Invoke-HarnessBash -Bash $bash -Command @('uname', '-s') -DiscardStderr
 if ($uname -notmatch 'MINGW|MSYS') {
     Say "resolved bash is not Git Bash (uname='$uname') -- refusing." 'Red'
     exit 2
@@ -194,7 +233,11 @@ Say "bash: $bash ($uname)" 'Gray'
 # claude must be visible to GIT BASH, not merely to PowerShell: kick-loop.sh is what
 # invokes it. Checking only PowerShell's view passes, then the driver dies one line
 # later -- checking the wrong thing and passing is worse than not checking.
-$claudeInBash = (& $bash --login -c 'p=$(command -v claude) || exit; printf "%s\n" "$p"; exec true') 2>$null
+# (`command` is a shell builtin, so this stays a raw -c payload rather than an
+# Invoke-HarnessBash exec; it is space-only and double-quote-free, which PS 5.1
+# forwards intact, and stderr is discarded INSIDE bash, so no PowerShell
+# redirect can turn it into a terminating error.)
+$claudeInBash = (& $bash --login -c 'command -v claude 2>/dev/null')
 if (-not $claudeInBash) {
     Say 'the `claude` CLI is not on Git Bash''s PATH (kick-loop.sh cannot invoke it)' 'Red'
     exit 2
@@ -230,7 +273,11 @@ if (-not (Test-TreeClean)) {
     Say '-Force given: starting anyway (you were warned)' 'Red'
 }
 
-$startHead = (& git rev-parse HEAD).Trim()
+$startHead = Get-HeadCommit
+if (-not $startHead) {
+    Say 'the repository has no commits yet (unborn HEAD) -- commit the installed harness first, then re-run.' 'Red'
+    exit 2
+}
 Say ("start HEAD {0}; budget {1} slice(s), {2} per batch" -f `
      $startHead.Substring(0, 10), $MaxSlices, $Batch) 'Cyan'
 
@@ -243,22 +290,25 @@ try {
     # and loop again, retrying forever exactly where it must stop for a human.
     :driver while ($landed -lt $MaxSlices) {
 
-        $before    = (& git rev-parse HEAD).Trim()
+        $before    = Get-HeadCommit
         $thisBatch = [Math]::Min($Batch, $MaxSlices - $landed)
 
         Say ("--- driver: --drive --max {0}  (landed {1}/{2})" -f `
              $thisBatch, $landed, $MaxSlices) 'Cyan'
 
-        $driverArgs = @('--login', '-c', 'exec "$@"', 'harness', 'migration/tools/kick-loop.sh', '--drive', '--max', $thisBatch, '--prompt', '.harness/run-loop-prompt.md')
-        if ($Review) { $driverArgs += '--review' }
+        $driverCommand = @('migration/tools/kick-loop.sh', '--drive', '--max', "$thisBatch", '--prompt', '.harness/run-loop-prompt.md')
+        if ($Review) { $driverCommand += '--review' }
 
-        & $bash @driverArgs 2>&1 | Tee-Object -FilePath $log -Append
+        # Stderr is merged INSIDE bash (-MergeStderr), never via a PowerShell
+        # 2>&1: on PS 5.1 that redirect turns the driver's first stderr line
+        # into a terminating error and skips the whole rc classification below.
+        Invoke-HarnessBash -Bash $bash -Command $driverCommand -MergeStderr | Tee-Object -FilePath $log -Append
         $rc = $LASTEXITCODE
 
         # Whatever happened, never leave a tick running unsupervised.
         Stop-Orphans "driver returned rc=$rc" | Out-Null
 
-        $after = (& git rev-parse HEAD).Trim()
+        $after = Get-HeadCommit
         $new   = @(& git log --oneline "$before..$after")
         if ($new.Count -gt 0) {
             $landed += $new.Count
@@ -339,13 +389,21 @@ try {
 finally {
     # Ctrl-C lands here too. The whole point: never leave a tick orphaned.
     Stop-Orphans 'shutting down' | Out-Null
+
+    # The driver lock (.harness/kick-loop.lock) is created and removed by
+    # kick-loop.sh ITSELF (EXIT trap), and its stale-lock TTL recovery covers
+    # the SIGKILL case. Do NOT delete it here: the pid in its meta file is an
+    # MSYS pid, not necessarily a Windows pid, so this side cannot reliably
+    # tell a dead owner from a live one -- and deleting a live driver's lock
+    # (say, a scheduler fired kick-loop.sh directly while we were finishing)
+    # would let two drivers interleave, the exact failure the lock prevents.
     if (Test-Path $lock) {
-        Say 'releasing a stale driver lock' 'Yellow'
-        Remove-Item -Recurse -Force $lock -ErrorAction SilentlyContinue
+        Say "note: $lock still exists -- it belongs to kick-loop.sh (a live driver, or its TTL recovery will clear it)." 'Yellow'
+        Say "  if you are CERTAIN no driver is running: Remove-Item -Recurse $lock" 'Gray'
     }
 
-    $endHead = (& git rev-parse HEAD).Trim()
-    $all     = @(& git log --oneline "$startHead..$endHead")
+    $endHead = Get-HeadCommit
+    $all     = if ($startHead -and $endHead) { @(& git log --oneline "$startHead..$endHead") } else { @() }
     Say '--- summary -----------------------------------------------------------' 'Cyan'
     Say ("slices landed: {0}" -f $all.Count) $(if ($all.Count) { 'Green' } else { 'Yellow' })
     foreach ($c in $all) { Say "  $c" 'Green' }

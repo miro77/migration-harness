@@ -108,7 +108,7 @@ try {
     . (Join-Path $target 'migration\tools\_git-bash.ps1')
     $bash = Get-HarnessBash
     Push-Location $target
-    try { & $bash --login -c 'exec "$@"' harness 'migration/tools/doctor.sh' } finally { Pop-Location }
+    try { Invoke-HarnessBash -Bash $bash -Command @('migration/tools/doctor.sh') } finally { Pop-Location }
 }
 catch {
     Write-Warning "status check skipped: $($_.Exception.Message)"
