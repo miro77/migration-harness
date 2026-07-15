@@ -8,9 +8,18 @@
 # and the frozen / command guards. Run it after ANY edit to the hooks or the
 # tools/ scripts. Exit 0 = all pass; 1 = at least one failure.
 #
-# Self-contained: needs only bash + git. No project toolchain required (the
-# scenario gates.sh is neutralised to a no-op pass).
+# Self-contained: needs only bash + git + GNU sed (the TEST SUITE uses GNU-only
+# `sed -i` / range-`c\` constructs; product scripts stay POSIX). No project
+# toolchain required (the scenario gates.sh is neutralised to a no-op pass).
 set -uo pipefail
+
+# Fail fast on BSD/macOS sed — GNU-only sed edits below would half-apply and
+# every downstream assertion would fail for the wrong reason.
+if ! sed --version >/dev/null 2>&1; then
+  echo "FATAL: the harness TEST SUITE requires GNU sed (BSD/macOS sed detected)." >&2
+  echo "       brew install gnu-sed and put gsed first in PATH as 'sed'. Product scripts remain POSIX." >&2
+  exit 2
+fi
 
 # --- locate the installed harness (dir containing .claude/hooks + migration/tools)
 self="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +37,21 @@ pass=0; fail=0
 ok(){ printf 'PASS: %s\n' "$1"; pass=$((pass+1)); }
 no(){ printf 'FAIL: %s (got %s want %s)\n' "$1" "$2" "$3"; fail=$((fail+1)); }
 chk(){ [ "$2" = "$3" ] && ok "$1" || no "$1" "$2" "$3"; }
+
+# Cleanup on ANY exit (incl. Ctrl-C / set -u aborts): remove whichever throwaway
+# repo is current and kill any background sleep still running. $R/$T2 point at
+# already-removed dirs on the happy path — rm -rf of a gone dir is a no-op.
+R=""; T2=""; npid=""
+cleanup(){
+  cd / 2>/dev/null || true
+  [ -n "${npid:-}" ] && kill "$npid" 2>/dev/null
+  [ -n "${R:-}" ]  && rm -rf "$R"
+  [ -n "${T2:-}" ] && rm -rf "$T2"
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- build a fresh repo with the harness installed and scope $1 configured
 mkrepo(){
@@ -52,8 +76,9 @@ mkrepo(){
     # Record the frozen-oracle baseline, exactly as a human does once during
     # bootstrap. Without it check-frozen.sh (and so gates.sh) fails closed — an
     # unbaselined oracle is UNPROVEN, not a pass — and every gate test here would
-    # be failing for the wrong reason.
-    bash migration/tools/check-frozen.sh --record >/dev/null 2>&1
+    # be failing for the wrong reason. (stderr: stdout is the captured repo path.)
+    bash migration/tools/check-frozen.sh --record >/dev/null 2>&1 \
+      || echo "SETUP FAILED: check-frozen.sh --record failed in $T — downstream gate FAILs are misattributed" >&2
     git add -A; git commit -qm init
   )
   echo "$T"
@@ -62,6 +87,17 @@ STOP(){ printf '{"stop_hook_active":false}' | bash .claude/hooks/stop-require-ga
 GUARD(){ printf '{"tool_input":{"command":"%s"}}' "$1" | bash .claude/hooks/pretooluse-command-guard.sh >/dev/null 2>&1; echo $?; }
 FROZEN(){ printf '{"tool_input":{"file_path":"%s"}}' "$1" | bash .claude/hooks/pretooluse-frozen-legacy.sh >/dev/null 2>&1; echo $?; }
 GATE(){ bash migration/tools/gates.sh >/dev/null 2>&1; }
+
+# --- bootstrap sanity: fail FAST if mkrepo's frozen-baseline recording is broken.
+# Without this, a broken check-frozen.sh --record surfaces as dozens of unrelated
+# downstream gate FAILs instead of one clear setup error (e2e-smoke asserts the
+# same step; the selftest must too).
+R="$(mkrepo 'src')"
+if ! ( cd "$R" && bash migration/tools/check-frozen.sh >/dev/null 2>&1 ); then
+  echo "FATAL: selftest bootstrap broken — check-frozen.sh --record did not yield a passing baseline in a fresh repo" >&2
+  exit 1
+fi
+rm -rf "$R"
 
 # ============================================================ content hash
 R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
@@ -1163,6 +1199,127 @@ chmod +x "$FAKEBIN/claude"
 KL --drive --max 4 >/dev/null 2>&1
 chk "escalate: tick 2 escalated after the idle tick 1" "$(sed -n 2p .harness/state/models-used)" "opus"
 chk "escalate: tick 3 back to default after progress"  "$(sed -n 3p .harness/state/models-used)" "(default)"
+cd /; rm -rf "$R"
+
+# ==================================================== tracked-but-ignored files
+# A file committed BEFORE a matching .gitignore pattern was added stays tracked
+# in the real index — but the hash tool builds a THROWAWAY index, where (without
+# seeding it from HEAD) the file looks untracked-and-ignored and `git add -A`
+# silently skips it: edits to it never move the hash and the Stop hook waves
+# them through (confirmed bypass; fixed by seeding the temp index from HEAD).
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+printf 'prod-v1\n' > src/config.prod.txt
+git add -f src/config.prod.txt >/dev/null 2>&1; git commit -qm prod >/dev/null
+printf '*.prod.txt\n' > .gitignore
+git add .gitignore >/dev/null 2>&1; git commit -qm ignore >/dev/null
+hI1="$(bash migration/tools/working-tree-hash.sh)"
+printf 'prod-v2 TAMPERED\n' > src/config.prod.txt
+hI2="$(bash migration/tools/working-tree-hash.sh)"
+[ "$hI1" != "$hI2" ] && ok "hash: tracked-but-ignored edit moves the hash" \
+  || no "hash: tracked-but-ignored edit moves the hash" "$hI2" "!=$hI1"
+git checkout -q -- src/config.prod.txt
+rm src/config.prod.txt
+hI3="$(bash migration/tools/working-tree-hash.sh)"
+[ "$hI1" != "$hI3" ] && ok "hash: tracked-but-ignored deletion moves the hash" \
+  || no "hash: tracked-but-ignored deletion moves the hash" "$hI3" "!=$hI1"
+git checkout -q -- src/config.prod.txt
+# and the Stop hook actually holds the un-gated edit to such a file
+GATE; chk "stop: gated tree with ignored-tracked file allows" "$(STOP)" 0
+printf 'sneaky\n' > src/config.prod.txt
+chk "stop: un-gated ignored-tracked edit blocks" "$(STOP)" 2
+cd /; rm -rf "$R"
+
+# ==================================================== audit snapshot (commit-then-gate)
+# check-audits compares against the board snapshot record-gates.sh wrote at the
+# last SUCCESSFUL gate run — not HEAD. `git commit` is un-gated, so trusting
+# HEAD let write-row -> commit -> gate launder an unaudited audited-pass
+# (confirmed bypass; the HEAD fallback survives only for fresh clones).
+AUD(){ bash migration/tools/check-audits.sh >/dev/null 2>&1; echo $?; }
+setrow(){ sed -i "s#^| B01 |.*#| B01 | bootstrap | - | - | - | $1 | - | - |#" migration/parity-matrix.md; }
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+GATE   # records the proof AND the board snapshot
+[ -f .harness/state/gates-passed.parity-matrix.md ] \
+  && ok "record-gates: board snapshot written on gate pass" \
+  || no "record-gates: board snapshot written on gate pass" "missing" "present"
+setrow 'audited-pass'
+git add migration/parity-matrix.md; git commit -qm "migrate B01: audited-pass" >/dev/null
+chk "audits: commit-then-gate no longer exempts the row" "$(AUD)" 1
+bash migration/tools/record-audit.sh B01 pass >/dev/null 2>&1
+chk "audits: honest record still satisfies it" "$(AUD)" 0
+GATE   # snapshot now contains the settled row
+printf 'later slice\n' > src/a.txt
+rm -rf .harness/state/audits
+chk "audits: row settled in the snapshot stays settled" "$(AUD)" 0
+cd /; rm -rf "$R"
+
+# ==================================================== frozen baseline provenance
+# The reference must be read from git, not the working tree: an agent that can
+# mutate the oracle through a hook bypass can forge the working-tree baseline
+# the same way, and trackedness alone would still verify (confirmed launder).
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+FRZ(){ bash migration/tools/check-frozen.sh >/dev/null 2>&1; echo $?; }
+chk "frozen: committed baseline verifies" "$(FRZ)" 0
+printf 'class A{ drifted }\n' > legacy/src/A.java
+forged="$( { printf '%s\n' legacy/src/A.java \
+  | GIT_INDEX_FILE=.git/selftest-forge git add -f --pathspec-from-file=- -- 2>/dev/null
+  GIT_INDEX_FILE=.git/selftest-forge git write-tree; } )"
+printf '%s\n' "$forged" > migration/frozen-baseline.sha
+chk "frozen: forged working-tree baseline cannot launder drift" "$(FRZ)" 1
+git checkout -q -- migration/frozen-baseline.sha legacy/src/A.java
+chk "frozen: restored oracle verifies again" "$(FRZ)" 0
+cd /; rm -rf "$R"
+
+# ==================================================== feature-profile checkpoint subject
+# The escape must accept the feature profile's `feat <id>:` convention
+# (CLAUDE-feature.md rule 9), not only `migrate <id>:` — a compliant feature
+# checkpoint used to be classified un-gated for its prefix alone.
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+GATE
+printf '\ncheckpoint\n' >> migration/parity-matrix.md
+git add migration/parity-matrix.md; git commit -qm "feat S03: audited-fail" >/dev/null
+chk "stop: feat-prefixed bookkeeping checkpoint allows" "$(STOP)" 0
+printf '\nmore\n' >> migration/parity-matrix.md
+git add migration/parity-matrix.md; git commit -qm "wip S03: audited-fail" >/dev/null
+chk "stop: unknown-prefix checkpoint still blocks" "$(STOP)" 2
+cd /; rm -rf "$R"
+
+# ==================================================== stub-tag integrity
+# Registration means a real OPEN table row: the shipped INTEG-example row is a
+# format sample (else copying its tag onto every stub is a universal amnesty),
+# prose mentions are not rows, and a `wired` row cannot cover a sentinel that
+# is still in the source.
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+STUBS(){ bash migration/tools/check-stubs.sh >/dev/null 2>&1; echo $?; }
+mkdir -p app
+printf 'STUB_SENTINEL="not yet implemented"\nSTUB_SCAN="app"\n' >> migration/harness.env
+printf 'x = "not yet implemented" // INTEG-example\n' > app/a.txt
+git add app >/dev/null 2>&1
+chk "stubs: INTEG-example tag is rejected" "$(STUBS)" 1
+printf '| INTEG-real | thing | stub | B01 | menu | F-w | - |\n' >> migration/integration-ledger.md
+printf 'x = "not yet implemented" // INTEG-real\n' > app/a.txt
+chk "stubs: open-row registration accepted" "$(STUBS)" 0
+printf 'prose mentions INTEG-prose casually\n' >> migration/integration-ledger.md
+printf 'x = "not yet implemented" // INTEG-prose\n' > app/a.txt
+chk "stubs: prose mention is not a registration" "$(STUBS)" 1
+sed -i 's/| INTEG-real | thing | stub |/| INTEG-real | thing | wired |/' migration/integration-ledger.md
+printf 'x = "not yet implemented" // INTEG-real\n' > app/a.txt
+chk "stubs: wired row cannot cover a live sentinel" "$(STUBS)" 1
+cd /; rm -rf "$R"
+
+# ==================================================== guard: state root + tree-wide reverts
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+chk "guard: rm of .harness/state root blocks"      "$(GUARD 'rm -rf .harness/state')" 2
+chk "guard: rm of .harness root blocks"            "$(GUARD 'rm -rf .harness')" 2
+chk "guard: rm of idle-ticks stays allowed"        "$(GUARD 'rm .harness/state/idle-ticks')" 0
+chk "guard: rm of a board snapshot blocks"         "$(GUARD 'rm .harness/state/gates-passed.parity-matrix.md')" 2
+chk "guard: write to a board snapshot blocks"      "$(GUARD 'echo x > .harness/state/gates-passed.parity-matrix.md')" 2
+chk "guard: git checkout -- . blocks"              "$(GUARD 'git checkout -- .')" 2
+chk "guard: git checkout . blocks"                 "$(GUARD 'git checkout .')" 2
+chk "guard: git restore . blocks"                  "$(GUARD 'git restore .')" 2
+chk "guard: git clean -fd blocks"                  "$(GUARD 'git clean -fd')" 2
+chk "guard: branch checkout allowed"               "$(GUARD 'git checkout main')" 0
+chk "guard: explicit-path restore allowed"         "$(GUARD 'git checkout -- src/a.txt')" 0
+chk "guard: git clean dry-run allowed"             "$(GUARD 'git clean -nd')" 0
 cd /; rm -rf "$R"
 
 echo "----------------------------------------"

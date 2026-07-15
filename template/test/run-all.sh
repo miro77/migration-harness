@@ -22,6 +22,14 @@ while [ "$d" != "/" ]; do
 done
 [ -n "$H" ] || { echo "FATAL: harness root not found above $self"; exit 1; }
 
+# The TEST SUITE (selftest, e2e) uses GNU-only sed constructs; product scripts
+# stay POSIX. Fail fast on BSD/macOS sed instead of half-applying edits.
+if ! sed --version >/dev/null 2>&1; then
+  echo "FATAL: the harness TEST SUITE requires GNU sed (BSD/macOS sed detected)." >&2
+  echo "       brew install gnu-sed and put gsed first in PATH as 'sed'. Product scripts remain POSIX." >&2
+  exit 2
+fi
+
 rc=0
 line(){ echo; echo "==================== $1 ===================="; }
 
@@ -77,7 +85,17 @@ elif command -v powershell.exe >/dev/null 2>&1; then
   elif command -v wslpath >/dev/null 2>&1; then winpath="$(wslpath -w "$psscript" 2>/dev/null)"
   fi
   if [ -n "$winpath" ]; then
-    psout="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$winpath" 2>&1)"; psrc=$?; psran=1
+    case "$winpath" in
+      \\\\*)
+        # A WSL checkout translates to a UNC path (\\wsl.localhost\...), and
+        # Windows PowerShell refuses to run scripts from UNC ("AuthorizationManager
+        # check failed") even with -ExecutionPolicy Bypass. Running it anyway would
+        # count that inevitable failure as red — skip LOUDLY instead.
+        echo "SKIP: Windows PowerShell cannot execute scripts from a WSL UNC path ($winpath)."
+        echo "      Install pwsh inside WSL, or run test\\run-all.ps1 from Windows." ;;
+      *)
+        psout="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$winpath" 2>&1)"; psrc=$?; psran=1 ;;
+    esac
   else
     echo "powershell.exe found but no cygpath/wslpath to translate '$psscript' - skipped"
   fi

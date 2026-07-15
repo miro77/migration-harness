@@ -33,7 +33,10 @@ else
   ok "install.sh shellcheck skipped (not installed)"
 fi
 
-T="$(mktemp -d)"; trap 'cd /; rm -rf "$T"' EXIT
+# T2/T3 are created later for the .gitattributes scenarios; the trap must cover
+# them too, or an interrupt between their mktemp and their explicit rm leaks them.
+T="$(mktemp -d)"; T2=""; T3=""
+trap 'cd /; rm -rf "$T" ${T2:+"$T2"} ${T3:+"$T3"}' EXIT
 cd "$T"; git init -q; git config core.autocrlf false; git config user.email i@i; git config user.name i
 printf '# my project\n' > README-mine.md   # pre-existing file must survive
 

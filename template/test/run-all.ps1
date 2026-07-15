@@ -2,11 +2,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try {
-    . (Join-Path $PSScriptRoot '..\migration\tools\_git-bash.ps1')
+    . (Join-Path $PSScriptRoot '../migration/tools/_git-bash.ps1')
     $root = Get-HarnessRoot -StartPath $PSScriptRoot
     $bash = Get-HarnessBash
     Push-Location $root
-    try { & $bash --login -c 'exec "$@"' harness 'test/run-all.sh' @args; $code = $LASTEXITCODE } finally { Pop-Location }
+    try { Invoke-HarnessBash -Bash $bash -Command (@('test/run-all.sh') + $args); $code = $LASTEXITCODE } finally { Pop-Location }
     exit $code
 }
 catch {

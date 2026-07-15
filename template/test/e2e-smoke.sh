@@ -7,8 +7,17 @@
 # Unlike harness-selftest.sh (which neuters gates.sh to a no-op so it can focus
 # on the enforcement plumbing), THIS exercises the real gates.sh -> record-gates
 # path and a gate that genuinely fails — the coverage the selftest can't give.
-# Needs only bash + git.
+# Needs only bash + git + GNU sed (the TEST SUITE uses GNU-only `sed -i` range
+# constructs; product scripts stay POSIX).
 set -uo pipefail
+
+# Fail fast on BSD/macOS sed — the GNU-only sed edit below would half-apply and
+# the assertions would fail for the wrong reason.
+if ! sed --version >/dev/null 2>&1; then
+  echo "FATAL: the harness TEST SUITE requires GNU sed (BSD/macOS sed detected)." >&2
+  echo "       brew install gnu-sed and put gsed first in PATH as 'sed'. Product scripts remain POSIX." >&2
+  exit 2
+fi
 
 self="$(cd "$(dirname "$0")" && pwd)"
 H=""; d="$self"

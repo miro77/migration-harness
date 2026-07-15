@@ -25,6 +25,22 @@ exists(){ if [ -e "$1" ]; then ok "$2 ($1)"; else no "$2 — missing: $1"; fi; }
 echo "== settings.json hook wiring =="
 sj=.claude/settings.json
 if [ -f "$sj" ]; then
+  # settings.json must be PARSEABLE JSON. A syntax error here (one trailing
+  # comma) makes Claude Code silently drop the whole hook config — every
+  # enforcement hook, Stop hook included — while all runtime tests stay green,
+  # because they invoke the hooks directly with bash, never via this wiring.
+  if command -v python3 >/dev/null 2>&1; then
+    for j in .claude/settings.json .claude/settings.local.json; do
+      [ -f "$j" ] || continue
+      if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$j" >/dev/null 2>&1; then
+        ok "parses as JSON ($j)"
+      else
+        no "INVALID JSON — Claude Code would silently load NO hooks ($j)"
+      fi
+    done
+  else
+    echo "SKIP: python3 not available — settings.json JSON validity NOT checked (a syntax error would disable all hooks unnoticed)"
+  fi
   # Every hook path named in settings.json must resolve to a real file — catches
   # a rename/typo that would make Claude Code try to run a missing hook.
   hooks=$(grep -oE '\.claude/hooks/[A-Za-z0-9._-]+\.sh' "$sj" | sort -u)

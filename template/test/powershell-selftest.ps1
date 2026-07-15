@@ -13,11 +13,23 @@ function Check([string] $Message, [bool] $Condition) {
     if ($Condition) { Pass $Message } else { Fail $Message }
 }
 
+# Windows PowerShell 5.1 turns a REDIRECTED native stderr line into a
+# terminating error under this script's $ErrorActionPreference = 'Stop'.
+# Every native call that captures or silences output runs through this guard,
+# so one diagnostic line from a child cannot abort the suite mid-run.
+function Invoke-Guarded([scriptblock] $Native) {
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Native } finally { $ErrorActionPreference = $previousPreference }
+}
+
+# Forward slashes throughout: a backslash literal in a path works only on
+# Windows, and this suite also runs under pwsh on Linux (run-all.sh stage 2c).
 function Find-HarnessRoot([string] $Start) {
     $directory = Get-Item -LiteralPath $Start
     while ($directory) {
-        if ((Test-Path -LiteralPath (Join-Path $directory.FullName '.claude\hooks\stop-require-gates.sh')) -and
-            (Test-Path -LiteralPath (Join-Path $directory.FullName 'migration\tools\working-tree-hash.sh'))) {
+        if ((Test-Path -LiteralPath (Join-Path $directory.FullName '.claude/hooks/stop-require-gates.sh')) -and
+            (Test-Path -LiteralPath (Join-Path $directory.FullName 'migration/tools/working-tree-hash.sh'))) {
             return $directory.FullName
         }
         $directory = $directory.Parent
@@ -29,7 +41,7 @@ function Find-DistributionRoot([string] $Start) {
     $directory = Get-Item -LiteralPath $Start
     while ($directory) {
         if ((Test-Path -LiteralPath (Join-Path $directory.FullName 'install.ps1')) -and
-            (Test-Path -LiteralPath (Join-Path $directory.FullName 'template\.claude\hooks\stop-require-gates.sh'))) {
+            (Test-Path -LiteralPath (Join-Path $directory.FullName 'template/.claude/hooks/stop-require-gates.sh'))) {
             return $directory.FullName
         }
         $directory = $directory.Parent
@@ -48,18 +60,27 @@ foreach ($file in $parseFiles) {
     Check "PowerShell parses ($($file.Name))" ($errors.Count -eq 0)
 }
 
-. (Join-Path $harness 'migration\tools\_git-bash.ps1')
+. (Join-Path $harness 'migration/tools/_git-bash.ps1')
 $bash = Get-HarnessBash
 Check 'PowerShell bridge resolves Bash' (Test-Path -LiteralPath $bash -PathType Leaf)
-& $bash --login -c 'exec dirname --version' *> $null
+Invoke-Guarded { & $bash --login -c 'exec dirname --version' *> $null }
 Check 'resolved Bash has Unix utilities' ($LASTEXITCODE -eq 0)
 
+# The argument bridge must forward faithfully on THIS PowerShell version:
+# spaces must not word-split, globs must not expand, single quotes and empty
+# arguments must survive. (Exactly what the old `-c 'exec "$@"'` bridge got
+# wrong on PS 5.1, where the payload degraded to an unquoted `exec $@`.)
+$echoed = @(Invoke-Guarded {
+    Invoke-HarnessBash -Bash $bash -Command @('printf', '<%s>', 'a b', '*.sh', "it's", '') })
+Check 'argument bridge forwards spaces/globs/quotes/empty intact' (
+    ($echoed -join '') -eq "<a b><*.sh><it's><>")
+
 foreach ($relative in @(
-    'migration\tools\doctor.ps1',
-    'migration\tools\gates.ps1',
-    'migration\tools\kick-loop.ps1',
-    'migration\run-loop.ps1',
-    'test\run-all.ps1'
+    'migration/tools/doctor.ps1',
+    'migration/tools/gates.ps1',
+    'migration/tools/kick-loop.ps1',
+    'migration/run-loop.ps1',
+    'test/run-all.ps1'
 )) {
     Check "PowerShell entry point exists ($relative)" (Test-Path -LiteralPath (Join-Path $harness $relative))
 }
@@ -67,7 +88,7 @@ foreach ($relative in @(
 $engine = (Get-Process -Id $PID).Path
 $engineArgs = @('-NoProfile')
 if ($PSVersionTable.PSEdition -eq 'Desktop') { $engineArgs += @('-ExecutionPolicy', 'Bypass') }
-$testRoot = Join-Path $harness ('.harness\powershell-selftest-' + [guid]::NewGuid().ToString('N'))
+$testRoot = Join-Path $harness ('.harness/powershell-selftest-' + [guid]::NewGuid().ToString('N'))
 
 try {
     $installed = Join-Path $testRoot 'installed'
@@ -79,20 +100,23 @@ try {
     & git -C $installed config user.email powershell-selftest@local
     & git -C $installed config user.name powershell-selftest
 
-    $doctorOutput = @(& $engine @engineArgs -File (Join-Path $installed 'migration\tools\doctor.ps1') 2>&1)
+    $doctorOutput = @(Invoke-Guarded { & $engine @engineArgs -File (Join-Path $installed 'migration/tools/doctor.ps1') 2>&1 })
     Check 'doctor.ps1 preserves successful exit code' ($LASTEXITCODE -eq 0)
     Check 'doctor.ps1 emits the harness report' (($doctorOutput -join "`n") -match 'harness config')
 
-    $checkOutput = @(& $engine @engineArgs -File (Join-Path $installed 'migration\tools\kick-loop.ps1') '--check' 2>&1)
+    $checkOutput = @(Invoke-Guarded { & $engine @engineArgs -File (Join-Path $installed 'migration/tools/kick-loop.ps1') '--check' 2>&1 })
     Check 'kick-loop.ps1 passes raw --arguments and exit code' ($LASTEXITCODE -eq 0)
     Check 'kick-loop.ps1 --check reports resumable state' (($checkOutput -join "`n") -match 'STATE: resume')
 
-    $oldErrorPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $gateOutput = @(& $engine @engineArgs -File (Join-Path $installed 'migration\tools\gates.ps1') 2>&1)
-    $gateCode = $LASTEXITCODE
-    $ErrorActionPreference = $oldErrorPreference
-    Check 'gates.ps1 preserves a failing gate exit code' ($gateCode -eq 1)
+    # End-to-end forwarding regression: an argument containing a space must
+    # arrive at the .sh as ONE argument (kick-loop.sh then reports the missing
+    # prompt file by its full, unsplit name and exits 2).
+    $spacedOutput = @(Invoke-Guarded { & $engine @engineArgs -File (Join-Path $installed 'migration/tools/kick-loop.ps1') '--prompt' 'no such file.md' 2>&1 })
+    Check 'kick-loop.ps1 forwards an argument containing spaces intact' (
+        $LASTEXITCODE -eq 2 -and (($spacedOutput -join "`n") -match 'no such file\.md'))
+
+    $gateOutput = @(Invoke-Guarded { & $engine @engineArgs -File (Join-Path $installed 'migration/tools/gates.ps1') 2>&1 })
+    Check 'gates.ps1 preserves a failing gate exit code' ($LASTEXITCODE -eq 1)
     Check 'gates.ps1 preserves gate diagnostics' (($gateOutput -join "`n").Trim().Length -gt 0)
 
     if ($distribution) {
@@ -101,17 +125,13 @@ try {
         & git -C $target init -q
         & git -C $target config user.email powershell-selftest@local
         & git -C $target config user.name powershell-selftest
-        & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target *> $null
+        Invoke-Guarded { & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target *> $null }
         Check 'install.ps1 installs into a fresh repository' ($LASTEXITCODE -eq 0)
-        Check 'install.ps1 includes Windows launchers' (Test-Path -LiteralPath (Join-Path $target 'migration\tools\kick-loop.ps1'))
+        Check 'install.ps1 includes Windows launchers' (Test-Path -LiteralPath (Join-Path $target 'migration/tools/kick-loop.ps1'))
 
-        $oldErrorPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target *> $null
-        $collisionCode = $LASTEXITCODE
-        $ErrorActionPreference = $oldErrorPreference
-        Check 'install.ps1 refuses to clobber without -Force' ($collisionCode -eq 1)
-        & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target -Force *> $null
+        Invoke-Guarded { & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target *> $null }
+        Check 'install.ps1 refuses to clobber without -Force' ($LASTEXITCODE -eq 1)
+        Invoke-Guarded { & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target -Force *> $null }
         Check 'install.ps1 -Force overwrites successfully' ($LASTEXITCODE -eq 0)
     }
 }

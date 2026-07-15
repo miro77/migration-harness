@@ -2,9 +2,11 @@ name: harness-selftest
 
 # The enforcement harness's entire value is that it can't be silently bypassed.
 # A regression in a hook or tool is invisible without this, so run the bundled
-# regression guard (bash + git only) on every push and PR.
+# regression guard (bash + git only) on every PR and on pushes to main.
+# (push is filtered to main so a same-repo PR branch doesn't run everything twice.)
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -19,3 +21,18 @@ jobs:
       # (e.g. $HARNESS_FROZEN), so warning-level lint would be noise.
       - name: Run all harness tests
         run: bash template/test/run-all.sh
+
+  # The Windows story (CRLF handling, path translation, the PowerShell entry
+  # points) only breaks on a real Windows checkout — a Linux pwsh run cannot
+  # see it. run-all.ps1 locates Git Bash and runs the full Bash surface
+  # through it, so this exercises exactly what a Windows operator would run.
+  selftest-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run all harness tests via the PowerShell entry point
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\template\test\run-all.ps1"
+          exit $LASTEXITCODE
