@@ -18,11 +18,18 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "doc-gate: not a git
 fails=0
 note(){ printf 'BROKEN: %s\n' "$1"; fails=$((fails+1)); }
 
-# GitHub-ish heading slug: lowercase, drop punctuation except space/underscore/
-# hyphen, trim, spaces -> hyphens.
-slug(){ printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/`//g; s/[^a-z0-9 _-]//g; s/^ +//; s/ +$//; s/ +/-/g'; }
+# GitHub-ish heading slug: trim the raw text, lowercase, drop punctuation
+# except space/underscore/hyphen, then EACH space becomes its own hyphen —
+# GitHub's slugger does not collapse runs, so "A — B" slugs to a--b, not a-b
+# (the em-dash is dropped and both surrounding spaces survive as hyphens).
+slug(){ printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/`//g; s/[^a-z0-9 _-]//g; s/ /-/g'; }
 
-anchors_of(){ grep -E '^#{1,6}[[:space:]]' "$1" 2>/dev/null | sed -E 's/^#+[[:space:]]+//' | while IFS= read -r h; do slug "$h"; done; }
+# Drop fenced ``` blocks. Shared by the link, anchor, and inline-span scans:
+# content inside a fence is illustrative (an example link is not a reference,
+# a "# comment" in a shell example is not a heading).
+strip_fences(){ awk '/^[[:space:]]*```/ { fence = 1 - fence; next } !fence' "$1" 2>/dev/null; }
+
+anchors_of(){ strip_fences "$1" | grep -E '^#{1,6}[[:space:]]' | sed -E 's/^#+[[:space:]]+//' | while IFS= read -r h; do slug "$h"; done; }
 
 # Lexically resolve . and .. in a path (no filesystem access).
 norm(){ printf '%s' "$1" | awk -F/ '{n=0;for(i=1;i<=NF;i++){s=$i;
@@ -32,13 +39,11 @@ norm(){ printf '%s' "$1" | awk -F/ '{n=0;for(i=1;i<=NF;i++){s=$i;
 # Regex-escape a literal string for a grep -E pattern.
 esc(){ printf '%s' "$1" | sed -E 's/[][(){}.^$*+?|\\]/\\&/g'; }
 
-# Emit the content of every inline-code span in a Markdown file, skipping fenced
-# ``` code blocks (paths shown in a fenced example are illustrative, not refs).
-spans_of(){ awk '
-  /^[[:space:]]*```/ { fence = 1 - fence; next }
-  fence { next }
+# Emit the content of every inline-code span in a Markdown file (fenced ```
+# blocks already dropped by strip_fences, same as the link/anchor scans).
+spans_of(){ strip_fences "$1" | awk '
   { s=$0; while (match(s, /`[^`]+`/)) { print substr(s, RSTART+1, RLENGTH-2); s=substr(s, RSTART+RLENGTH) } }
-' "$1" 2>/dev/null; }
+'; }
 
 # NB: while-read instead of mapfile — gates.sh runs this on whatever bash is
 # on PATH, and stock macOS still ships bash 3.2 (no mapfile). A mapfile here
@@ -83,7 +88,7 @@ for f in "${MD[@]:-}"; do
       _anchors="$(anchors_of "$tf")"
       if ! printf '%s\n' "$_anchors" | grep -qxF "$anchor"; then note "$f -> $tgt  (no heading '#$anchor' in $tf)"; fi
     fi
-  done < <(grep -oE '\]\([^)]+\)' "$f" 2>/dev/null | sed -E 's/^\]\(//; s/\)$//; s/[[:space:]].*$//')
+  done < <(strip_fences "$f" | grep -oE '\]\([^)]+\)' | sed -E 's/^\]\(//; s/\)$//; s/[[:space:]].*$//')
 done
 
 # Inline-code path references: a `backtick path` that names a harness file/dir

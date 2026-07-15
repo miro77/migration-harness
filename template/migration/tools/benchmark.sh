@@ -2,31 +2,37 @@
 # Benchmark: run a slice with vs without the harness and compare gate results.
 #
 # Demonstrates the value of the harness: the same model, the same slice,
-# with and without enforcement. The "without" path temporarily disables
-# hooks (backs up settings.json) and uses a stripped prompt (no CLAUDE.md
-# rules, no gate enforcement, no auditor). Both paths run the SAME gates
-# afterward so the comparison is apples-to-apples.
+# with and without enforcement. The "without" path disables hooks (a
+# hooks-free settings.json), parks CLAUDE.md out of the way (claude -p
+# auto-loads it no matter what the prompt says), and uses a stripped prompt
+# (no gate enforcement, no auditor). Both paths run the SAME gates afterward
+# so the comparison is apples-to-apples.
 #
 # Usage:
 #   bash migration/tools/benchmark.sh <slice-id> [--rounds N]
 #
 # Requires: claude CLI on PATH, a configured harness with real gates.
 #
-# The script saves the git HEAD before each run and resets after, so both
-# paths start from the same tree. It does NOT auto-reset the parity matrix
-# — inspect and update migration/parity-matrix.md manually after.
+# Each path starts from the SAME tree: tracked content is reset to the saved
+# HEAD and untracked leftovers are cleaned (reset --hard alone leaves them,
+# and a slice's primary output is new UNTRACKED source files — one path
+# inheriting the other's files would invalidate the whole comparison). It does
+# NOT auto-reset the parity matrix in your history — inspect and update
+# migration/parity-matrix.md manually after.
 #
 # Exit 0 = both paths ran; the comparison table is on stdout. Non-zero =
-# setup or run error (the hooks/settings.json are always restored).
+# setup or run error (settings.json / CLAUDE.md are always restored).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "benchmark: not a git repository" >&2; exit 1; }
 [ -f migration/harness.env ] || { echo "benchmark: harness not installed here" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "benchmark: the 'claude' CLI must be on PATH" >&2; exit 2; }
 
-# This script uses `git reset --hard` between paths — uncommitted work would be
-# destroyed without a trace. Refuse to start on a dirty tree.
+# This script uses `git reset --hard` + `git clean -fd` between paths —
+# uncommitted or untracked work would be destroyed without a trace. Refuse to
+# start on a dirty tree (which also means: no untracked files exist that the
+# clean below could eat).
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-  echo "benchmark: working tree is not clean — commit or stash first (this script runs 'git reset --hard' between paths)" >&2
+  echo "benchmark: working tree is not clean — commit or stash first (this script runs 'git reset --hard' and 'git clean -fd' between paths)" >&2
   exit 2
 fi
 
@@ -42,28 +48,59 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$slice_id" ] || { echo "benchmark: a slice-id is required" >&2; exit 2; }
+case "$rounds" in ''|*[!0-9]*|0) echo "benchmark: --rounds needs a positive integer" >&2; exit 2 ;; esac
 
 sj=.claude/settings.json
-backup=""
-restore_hooks(){
-  if [ -n "$backup" ] && [ -f "$backup" ]; then
-    mv "$backup" "$sj"
-    echo "benchmark: restored $sj" >&2
-  fi
+# Path-local mutations (the hooks-free settings.json, the parked CLAUDE.md)
+# are backed up under .harness: it is outside the proof hash, gitignored by
+# the installer, and — critically — SURVIVES the `git clean -fd` between
+# paths (clean without -x skips ignored paths; the explicit -e is belt and
+# braces for repos that never gitignored .harness).
+mkdir -p .harness
+sj_backup=".harness/benchmark-settings.json.bak"
+cm_backup=".harness/benchmark-CLAUDE.md.bak"
+restore_all(){
+  if [ -f "$sj_backup" ]; then mv -f "$sj_backup" "$sj"; echo "benchmark: restored $sj" >&2; fi
+  if [ -f "$cm_backup" ]; then mv -f "$cm_backup" CLAUDE.md; echo "benchmark: restored CLAUDE.md" >&2; fi
 }
-trap restore_hooks EXIT
+trap restore_all EXIT
 
+# One benchmark run: reset the tree, apply the path's enforcement mode, run
+# the model, then gate. Stdout is ONLY the machine-readable verdict; the
+# transcript goes to stderr so it stays visible without drowning the table.
 run_path(){
-  local label="$1" prompt="$2"
+  local label="$1" prompt="$2" nohooks="$3"
   echo "=== $label ===" >&2
-  # Reset to the saved HEAD so both paths start clean.
+  # Reset BOTH tracked and untracked state so this path cannot inherit the
+  # other path's work (GATE:PASS earned by the other path's files is the
+  # exact contamination this script exists to rule out).
   git reset --hard "$save_head" >/dev/null 2>&1
+  git clean -fdq -e .harness >/dev/null 2>&1 || true
   rm -rf .harness/state/tool-stats 2>/dev/null || true
-  # Transcript goes to stderr (visible, but NOT captured): this function's
-  # stdout is the machine-readable verdict the comparison table prints, and a
-  # full transcript in the result variable would drown the table.
+  # Enforcement swap AFTER the reset: settings.json is tracked, so a reset
+  # inside this function after the swap would silently restore the hooks and
+  # run the "without" path WITH them (the A/B was A/A; found by external
+  # review).
+  if [ "$nohooks" = "nohooks" ]; then
+    cp "$sj" "$sj_backup"
+    cat > "$sj" <<'NOHOOKS'
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash migration/tools/gates.sh:*)"
+    ]
+  }
+}
+NOHOOKS
+    if [ -f CLAUDE.md ]; then mv CLAUDE.md "$cm_backup"; fi
+  fi
   claude -p "$prompt" >&2 2>&1 || true
-  # Run gates and record the result.
+  # Restore enforcement BEFORE gating so both paths are judged by the same
+  # gates under the same config, and so a crash mid-gate leaves nothing
+  # swapped (the EXIT trap is then a no-op).
+  if [ "$nohooks" = "nohooks" ]; then
+    restore_all
+  fi
   if bash migration/tools/gates.sh >/dev/null 2>&1; then
     echo "GATE:PASS"
   else
@@ -73,7 +110,6 @@ run_path(){
 
 save_head=$(git rev-parse HEAD)
 
-# --- PATH A: full harness ---
 stripped_prompt="Migrate slice ${slice_id} for this repository. Read the source code and port it to the target stack. Implement the code and tests, then run the project's test suite to verify."
 
 harness_prompt="Advance the migration by exactly ONE tick. Run /migrate-slice for slice ${slice_id}. Read CLAUDE.md and migration/PLAN.md first. Follow the TICK PROCEDURE in migration/SINGLE-TICK-PROMPT.md exactly: implement the slice, run bash migration/tools/gates.sh, spawn the parity-auditor for a fresh-context audit, update migration/parity-matrix.md, and commit. One slice only."
@@ -81,39 +117,30 @@ harness_prompt="Advance the migration by exactly ONE tick. Run /migrate-slice fo
 echo "benchmark: slice=${slice_id} rounds=${rounds}" >&2
 echo >&2
 
-# --- PATH B (without harness) first so the harness state is clean for A ---
-backup="${sj}.benchmark-backup"
-cp "$sj" "$backup"
-# Disable hooks: replace settings.json with a hooks-free version.
-cat > "$sj" <<'NOHOOKS'
-{
-  "permissions": {
-    "allow": [
-      "Bash(bash migration/tools/gates.sh:*)"
-    ]
-  }
-}
-NOHOOKS
-
-b_result=$(run_path "WITHOUT HARNESS (no hooks, no CLAUDE.md, no auditor)" "$stripped_prompt")
-
-# --- Restore hooks for PATH A ---
-restore_hooks
-backup=""  # trap already restored
-trap - EXIT
-
-a_result=$(run_path "WITH HARNESS (hooks, CLAUDE.md, gates, auditor)" "$harness_prompt")
+a_results=(); b_results=()
+r=1
+while [ "$r" -le "$rounds" ]; do
+  # B (without harness) first so the harness state is clean for A.
+  b_results+=("$(run_path "round $r: WITHOUT HARNESS (no hooks, no CLAUDE.md, no auditor)" "$stripped_prompt" nohooks)")
+  a_results+=("$(run_path "round $r: WITH HARNESS (hooks, CLAUDE.md, gates, auditor)" "$harness_prompt" hooks)")
+  r=$((r+1))
+done
 
 # --- Reset to the original tree ---
 git reset --hard "$save_head" >/dev/null 2>&1
+git clean -fdq -e .harness >/dev/null 2>&1 || true
 
 # --- Print comparison ---
 echo
 echo "════════════════════════════════════════════════════════════"
-echo "  BENCHMARK: slice ${slice_id}"
+echo "  BENCHMARK: slice ${slice_id} (${rounds} round(s))"
 echo "════════════════════════════════════════════════════════════"
-printf '  %-40s  %s\n' "WITH harness (A):" "$a_result"
-printf '  %-40s  %s\n' "WITHOUT harness (B):" "$b_result"
+i=0
+while [ "$i" -lt "$rounds" ]; do
+  printf '  round %-2s  %-28s  %s\n' "$((i+1))" "WITH harness (A):" "${a_results[$i]}"
+  printf '  round %-2s  %-28s  %s\n' "$((i+1))" "WITHOUT harness (B):" "${b_results[$i]}"
+  i=$((i+1))
+done
 echo "════════════════════════════════════════════════════════════"
 echo
 echo "A = PASS, B = FAIL  → the harness caught a problem the raw model missed."

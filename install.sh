@@ -19,13 +19,23 @@ for a in "$@"; do
 done
 target="${target:-.}"
 
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 src="$here/template"
 [ -d "$src/.claude/hooks" ] || { echo "install: template/ not found next to install.sh ($src)" >&2; exit 1; }
 
 mkdir -p "$target"
-target="$(cd "$target" && pwd)"
+target="$(cd "$target" && pwd -P)"
 [ "$target" != "$src" ] || { echo "install: target must differ from the template dir" >&2; exit 1; }
+# A target INSIDE the template dir would make cp copy the template into itself:
+# it errors mid-copy and leaves a half-installed junk tree polluting the template.
+# (rmdir -p undoes only the empty dirs the mkdir above just made; it cannot touch
+# anything non-empty.)
+case "$target" in
+  "$src"/*)
+    echo "install: target must not be inside the template dir ($src)" >&2
+    rmdir -p "$target" 2>/dev/null || true
+    exit 1 ;;
+esac
 
 echo "Installing harness"
 echo "  from: $src"
@@ -52,9 +62,14 @@ cp -R "$src/." "$target/"
 # Make the scripts executable (no-op-ish on Windows; harmless).
 chmod +x "$target"/migration/tools/*.sh "$target"/.claude/hooks/*.sh "$target"/test/*.sh 2>/dev/null || true
 
-# Gitignore the local proof state (idempotent).
+# Gitignore the local proof state (idempotent). Same no-final-newline guard as
+# .gitattributes below: appending to a file whose last line has no newline would
+# merge '.harness/' onto the user's last rule (e.g. '*.log' -> '*.log.harness/'),
+# silently voiding BOTH — the user's rule stops matching and the proof state
+# becomes committable.
 gi="$target/.gitignore"
 if [ ! -f "$gi" ] || ! grep -qxF '.harness/' "$gi"; then
+  if [ -f "$gi" ] && [ -s "$gi" ] && [ -n "$(tail -c1 "$gi")" ]; then printf '\n' >> "$gi"; fi
   printf '.harness/\n' >> "$gi"
   echo "  + added '.harness/' to .gitignore"
 fi

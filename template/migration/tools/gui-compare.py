@@ -16,6 +16,7 @@ Pillow). Needs Pillow; uses numpy and scikit-image (SSIM) if present.
 """
 import argparse
 import os
+import subprocess
 import sys
 
 try:
@@ -54,14 +55,21 @@ def compare(legacy_path, new_path, out_dir):
         diff_img = Image.fromarray(
             np.clip(per_pixel * 4, 0, 255).astype("uint8"), mode="L"
         ).convert("RGB")
-    else:  # pure-Pillow fallback
-        from PIL import ImageChops
+    else:  # pure-Pillow fallback — SAME metrics as the numpy path above, so
+        # the score does not depend on whether numpy is installed: mae is the
+        # mean abs diff over ALL channels (not a luma conversion, which would
+        # weight a pure-blue diff at 0.114x), pct_diff counts pixels whose
+        # WORST channel differs by >16 (pixelwise max via ImageChops.lighter).
+        from PIL import ImageChops, ImageStat
         d = ImageChops.difference(ca, cb)
-        hist = d.convert("L").histogram()
-        mae = sum(i * n for i, n in enumerate(hist)) / max(1, sum(hist))
+        stat = ImageStat.Stat(d)
+        mae = sum(stat.mean) / len(stat.mean)
         similarity = 1.0 - mae / 255.0
+        r, g, bch = d.split()
+        per_pixel = ImageChops.lighter(ImageChops.lighter(r, g), bch)
+        hist = per_pixel.histogram()
         pct_diff = 100.0 * sum(hist[17:]) / max(1, sum(hist))
-        diff_img = d.point(lambda x: min(255, x * 4))
+        diff_img = per_pixel.point(lambda x: min(255, x * 4)).convert("RGB")
 
     ssim = None
     try:
@@ -98,6 +106,19 @@ def compare(legacy_path, new_path, out_dir):
     }
 
 
+def _repo_root():
+    """Repo root for the default --out (the shell tools all cd there; running
+    this from a subdir must not scatter artifacts). Falls back to the cwd."""
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return top or os.getcwd()
+    except Exception:
+        return os.getcwd()
+
+
 def _selftest():
     """Generate two images (identical, then perturbed) and sanity-check scores."""
     import tempfile
@@ -121,7 +142,8 @@ def main():
     ap = argparse.ArgumentParser(description="Compare legacy vs new GUI screenshots (advisory).")
     ap.add_argument("legacy", nargs="?", help="legacy screenshot (PNG/JPG)")
     ap.add_argument("new", nargs="?", help="migrated-app screenshot")
-    ap.add_argument("--out", default="migration/reference/diff", help="output dir for artifacts")
+    ap.add_argument("--out", default=None,
+                    help="output dir for artifacts (default: migration/reference/diff under the repo root)")
     ap.add_argument("--fail-under", type=float, default=None,
                     help="opt-in: exit 1 if similarity < this (default: advisory, exit 0)")
     ap.add_argument("--selftest", action="store_true", help="self-check and exit")
@@ -131,8 +153,9 @@ def main():
         sys.exit(_selftest())
     if not args.legacy or not args.new:
         ap.error("legacy and new screenshots are required (or use --selftest)")
+    out_dir = args.out or os.path.join(_repo_root(), "migration", "reference", "diff")
     try:
-        r = compare(args.legacy, args.new, args.out)
+        r = compare(args.legacy, args.new, out_dir)
     except FileNotFoundError as e:
         sys.stderr.write(f"gui-compare: {e}\n")
         sys.exit(2)

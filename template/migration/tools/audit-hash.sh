@@ -15,8 +15,11 @@
 # the variable and the proof silently stops covering whatever it names. Same
 # reason this file is HARNESS_LOCKED.
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "audit-hash: not a git repository" >&2; exit 1; }
 
+# A missing harness.env must produce a diagnostic (like the sibling tools), not
+# a raw `set -e` abort mid-source — and never a silently-empty scope hash.
+[ -f migration/harness.env ] || { echo "audit-hash: migration/harness.env not found - is the harness installed here?" >&2; exit 1; }
 # shellcheck source=/dev/null
 source migration/harness.env
 read -r -a SCOPE <<< "${HARNESS_SCOPE:-}"

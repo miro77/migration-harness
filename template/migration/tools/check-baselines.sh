@@ -18,11 +18,18 @@
 #      PROJECT GATES block in gates.sh, an unconfigured oracle must not
 #      report green.
 #
-# Requires bash + awk. Board: parity-matrix.md (MATRIX_FILE overrides).
+# Requires bash + awk. Board: parity-matrix.md, or spec-matrix.md when
+# HARNESS_PROFILE=feature — same selection as check-matrix.sh (MATRIX_FILE
+# overrides both, for the self-tests).
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "check-baselines: not a git repository" >&2; exit 2; }
+# shellcheck source=/dev/null
+[ -f migration/harness.env ] && source migration/harness.env
 
-board="${MATRIX_FILE:-migration/parity-matrix.md}"
+board="${MATRIX_FILE:-}"
+if [ -z "$board" ]; then
+  if [ "${HARNESS_PROFILE:-migration}" = "feature" ]; then board="migration/spec-matrix.md"; else board="migration/parity-matrix.md"; fi
+fi
 [ -f "$board" ] || { echo "check-baselines: board not found: $board" >&2; exit 1; }
 
 # ---- 1. manifest: audited-pass T-rows require a committed fixture ----------

@@ -48,7 +48,14 @@ git ls-files --error-unmatch "$handoff" >/dev/null 2>&1 \
 [ -z "$(git status --porcelain -- "$handoff" 2>/dev/null)" ] \
   || fail "$handoff has uncommitted modifications - commit the termination record"
 
-claimed="$(head -n 1 "$handoff" | sed -n 's/^STATUS:[[:space:]]*\(COMPLETE\|BLOCKED\|FAILED\)[[:space:]]*$/\1/p')"
+# Extract the claimed state portably: \| alternation in a BRE is a GNU sed
+# extension (BSD/macOS sed treats it literally and matches nothing), so strip
+# the prefix/suffix with sed and validate the value with a case instead.
+claimed="$(head -n 1 "$handoff" | sed -n 's/^STATUS:[[:space:]]*//p' | sed 's/[[:space:]]*$//')"
+case "$claimed" in
+  COMPLETE|BLOCKED|FAILED) ;;
+  *) claimed="" ;;
+esac
 [ -n "$claimed" ] \
   || fail "$handoff line 1 must be exactly 'STATUS: COMPLETE|BLOCKED|FAILED' (got: '$(head -n 1 "$handoff")')"
 

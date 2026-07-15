@@ -37,7 +37,10 @@ if [ -x migration/tools/list-affected-units.sh ]; then
     || { echo "check-matrix: list-affected-units.sh failed" >&2; rm -f "$units_file"; exit 1; }
 fi
 
-awk -F'|' -v UNITS="${units_file:-}" '
+# The em-dash (a legitimate "no deps" cell) is passed in via -v: \x hex
+# escapes in awk regex/string literals are a gawk/mawk extension that
+# one-true-awk (macOS) does not support.
+awk -F'|' -v UNITS="${units_file:-}" -v ED="$(printf '\342\200\224')" '
 function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
 function err(m){ print "  " m > "/dev/stderr"; nerr++ }
 BEGIN {
@@ -77,11 +80,15 @@ END {
   # (b) dep ordering + T-before-M
   for (id in rows) {
     st = rows[id]
-    if (st == "audited-pass" && deps[id] != "" && deps[id] !~ /^[-\xe2\x80\x94 ]*$/) {
-      m = split(deps[id], dtok, /[,;][ \t]*| +/)
+    # Normalize em-dashes (ED, from -v above) to "-" so a "no deps" cell is
+    # recognized portably; row ids cannot contain an em-dash, so this is safe.
+    dstr = deps[id]
+    gsub(ED, "-", dstr)
+    if (st == "audited-pass" && dstr != "" && dstr !~ /^[- ]*$/) {
+      m = split(dstr, dtok, /[,;][ \t]*| +/)
       for (j = 1; j <= m; j++) {
         d = trim(dtok[j])
-        if (d == "" || d == "-" || d == "\xe2\x80\x94") continue
+        if (d == "" || d == "-") continue
         if (!(d in rows)) { err("row " id ": dep \x27" d "\x27 not found on the board"); continue }
         if (rows[d] != "audited-pass") err("row " id " is audited-pass but dep " d " is " rows[d])
       }
