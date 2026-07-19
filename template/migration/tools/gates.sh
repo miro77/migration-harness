@@ -62,6 +62,14 @@ fi
 bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration >&2 \
   || fail "broken internal Markdown reference(s) in the harness docs (see above; re-run: bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration)"
 
+# Contract integrity. The CLAUDE.md hard rules the machine gates enforce (rule 10
+# -> check-audits, rule 11 -> check-complete) must still be stated, and accepted
+# ADRs in decisions.md are immutable (supersede, don't rewrite).
+bash migration/tools/check-rule-refs.sh >&2 \
+  || fail "operating contract drifted from what the gates enforce (migration/tools/check-rule-refs.sh)"
+bash migration/tools/check-adr-immutable.sh >&2 \
+  || fail "an accepted ADR in migration/decisions.md was rewritten or deleted (migration/tools/check-adr-immutable.sh) — supersede it with a new ADR instead"
+
 # Frozen-oracle integrity. The PreToolUse hooks block the ACTIONS that would edit
 # the oracle; this verifies the OUTCOME, so a subagent that never fired the parent
 # hooks, an interpreter write, or an odd path spelling cannot move the reference

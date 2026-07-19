@@ -1131,6 +1131,53 @@ case "$out" in *"Possible loop"*) ok "telemetry: window full of same-file edits 
   *) no "telemetry: window full of same-file edits fires nudge" "$out" "Possible loop";; esac
 cd /; rm -rf "$R"
 
+# ============================================================ ADR immutability
+# Accepted ADRs in decisions.md are immutable (the file says so); check-adr-
+# immutable.sh makes it mechanical vs HEAD. New ADRs, status transitions, the
+# approved-deps table and PENDING edits are all fine; rewriting or deleting an
+# accepted ADR's body is not.
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+ADRI(){ bash migration/tools/check-adr-immutable.sh >/dev/null 2>&1; echo $?; }
+chk "adr: unchanged decisions pass"               "$(ADRI)" 0
+printf '\n## ADR-0007 — New choice (accepted)\n\nrationale.\n' >> migration/decisions.md
+chk "adr: appending a new ADR is allowed"         "$(ADRI)" 0
+git checkout -q -- migration/decisions.md
+sed -i 's/(accepted)$/(superseded by ADR-0009)/' migration/decisions.md   # first accepted heading
+chk "adr: a status transition is allowed"         "$(ADRI)" 0
+git checkout -q -- migration/decisions.md
+sed -i 's/Transpilation is rejected\./Rewritten rationale./' migration/decisions.md
+chk "adr: rewriting an accepted ADR body blocks"  "$(ADRI)" 1
+git checkout -q -- migration/decisions.md
+awk '!/## ADR-0002/{print}' migration/decisions.md > _d && mv _d migration/decisions.md
+chk "adr: deleting an accepted ADR blocks"        "$(ADRI)" 1
+git checkout -q -- migration/decisions.md
+sed -i 's/| (none yet) | | | |/| serde | 1 | json | Cargo.toml |/' migration/decisions.md
+chk "adr: editing the approved-deps table is allowed" "$(ADRI)" 0
+git checkout -q -- migration/decisions.md
+cd /; rm -rf "$R"
+
+# ============================================================ contract cross-refs
+# The CLAUDE.md hard rules the gates enforce (rule 10 -> check-audits, rule 11 ->
+# check-complete) must stay stated; a hardcoded rule COUNT must match reality.
+# mkrepo's minimal CLAUDE.md has no hard-rules section -> the lint SKIPS (0).
+R="$(mkrepo 'src migration .claude CLAUDE.md')"; cd "$R"
+RR(){ bash migration/tools/check-rule-refs.sh >/dev/null 2>&1; echo $?; }
+chk "rulerefs: no hard-rules section skips clean" "$(RR)" 0
+# install a realistic hard-rules section, then break it
+{ printf '## Hard rules\n\n'
+  printf '1. Preserve legacy behavior exactly.\n'
+  printf '10. Parity audits are performed by a fresh-context subagent (parity-auditor).\n'
+  printf '11. A feature is not done until REACHABLE; record it in the integration-ledger.md.\n'
+} >> CLAUDE.md
+chk "rulerefs: contract stating both rules passes" "$(RR)" 0
+saved="$(cat CLAUDE.md)"
+sed -i 's/fresh-context subagent/plain subagent/' CLAUDE.md
+chk "rulerefs: dropping the fresh-context rule blocks" "$(RR)" 1
+printf '%s\n' "$saved" > CLAUDE.md
+printf 'This project keeps the 2 hard rules intact.\n' >> AGENTS.md
+chk "rulerefs: a wrong hard-rule COUNT blocks"    "$(RR)" 1
+cd /; rm -rf "$R"
+
 # ============================================================ doctor (read-only report)
 # NB: capture output into a var and match with `case`, not `doctor | grep -q`.
 # grep -q closes the pipe on first match → doctor gets SIGPIPE → under this

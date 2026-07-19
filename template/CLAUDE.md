@@ -76,6 +76,18 @@ directly forges `.harness/state/gates-passed.diffsha` or weakens `gates.sh` can
 lie to the Stop hook. The command/path hooks block the obvious route to that,
 but CI or human review is the adversarial backstop.
 
+> **Hardening the backstop (optional).** The residual above is that the checker
+> runs in the same environment the agent can write. The stronger boundary is to
+> run the verification from a context the agent never touched: your CI already
+> does this (it re-runs `gates.sh` from a clean checkout on every push). For a
+> local equivalent, run the read-only integrity checks — `check-frozen`,
+> `check-locked`, `check-audits`, `check-complete`, `check-docs`,
+> `check-adr-immutable`, `check-rule-refs` — inside a pinned, network-isolated,
+> read-only container (e.g. `docker run --rm --network none -v "$PWD:/repo:ro"`),
+> so the checker the agent is judged by cannot be the one it may have edited.
+> Only the read-only checks fit that mould; the build/test gates need write
+> access (and usually network). This is defense-in-depth, not a new requirement.
+
 The frozen oracle gets the same treatment, and for the same reason. The PreToolUse
 hooks block the *actions* that would edit it — but action interception is
 bypassable by construction (a subagent whose calls never fire the parent's hooks,
