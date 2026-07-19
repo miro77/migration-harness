@@ -28,12 +28,13 @@ target="$(cd "$target" && pwd -P)"
 [ "$target" != "$src" ] || { echo "install: target must differ from the template dir" >&2; exit 1; }
 # A target INSIDE the template dir would make cp copy the template into itself:
 # it errors mid-copy and leaves a half-installed junk tree polluting the template.
-# (rmdir -p undoes only the empty dirs the mkdir above just made; it cannot touch
-# anything non-empty.)
+# Remove ONLY the just-created leaf if it is empty — NOT `rmdir -p`, which walks
+# up deleting every empty ancestor and would take out a pre-existing empty dir
+# inside template/ that we did not create.
 case "$target" in
   "$src"/*)
     echo "install: target must not be inside the template dir ($src)" >&2
-    rmdir -p "$target" 2>/dev/null || true
+    rmdir "$target" 2>/dev/null || true
     exit 1 ;;
 esac
 

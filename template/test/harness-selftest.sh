@@ -72,7 +72,7 @@ mkrepo(){
     # real gates the install wired. Anchoring on the sentinels (not the editable
     # `# ===` banners) survives a user's configured gates and any internal `# ===`.
     sed -i '/# HARNESS:PROJECT-GATES-START/,/# HARNESS:PROJECT-GATES-END/c\true  # selftest no-op gate' migration/tools/gates.sh
-    printf 'HARNESS_SCOPE="%s"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json .claude/settings.local.json migration/harness.env migration/frozen-baseline.sha"\n' "$scope" > migration/harness.env
+    printf 'HARNESS_SCOPE="%s"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json .claude/settings.local.json migration/harness.env migration/frozen-baseline.sha migration/locked-baseline.sha .git/hooks CLAUDE.md migration/SINGLE-TICK-PROMPT.md migration/LOOP-PROMPT.md"\n' "$scope" > migration/harness.env
     # Record the frozen-oracle baseline, exactly as a human does once during
     # bootstrap. Without it check-frozen.sh (and so gates.sh) fails closed — an
     # unbaselined oracle is UNPROVEN, not a pass — and every gate test here would
@@ -87,6 +87,10 @@ STOP(){ printf '{"stop_hook_active":false}' | bash .claude/hooks/stop-require-ga
 GUARD(){ printf '{"tool_input":{"command":"%s"}}' "$1" | bash .claude/hooks/pretooluse-command-guard.sh >/dev/null 2>&1; echo $?; }
 FROZEN(){ printf '{"tool_input":{"file_path":"%s"}}' "$1" | bash .claude/hooks/pretooluse-frozen-legacy.sh >/dev/null 2>&1; echo $?; }
 GATE(){ bash migration/tools/gates.sh >/dev/null 2>&1; }
+# Record a gate proof for the CURRENT tree, as gates.sh would on a real pass.
+# COMPLETE now requires a proof matching the final tree (check-complete.sh), so
+# COMPLETE fixtures call this after the tree reaches its terminal state.
+PROOF(){ HARNESS_GATES_ACTIVE=1 bash migration/tools/record-gates.sh >/dev/null 2>&1; }
 
 # --- bootstrap sanity: fail FAST if mkrepo's frozen-baseline recording is broken.
 # Without this, a broken check-frozen.sh --record surfaces as dozens of unrelated
@@ -206,6 +210,9 @@ printf '# Acme migration; uses a <Foo> generic and <T>\n' > CLAUDE.md
 GATE; chk "config: gate passes on configured CLAUDE.md (no false-positive on <Foo>/<T>)" "$?" 0
 printf '# Acme migration\nUse `<Widget />` in views; the shell is a <my-element> custom element.\n' > CLAUDE.md
 GATE; chk "config: gate passes on JSX/custom-element content (no false-positive)" "$?" 0
+# A DELETED contract must fail, not silently pass (grep on a missing file is false).
+rm -f CLAUDE.md
+GATE; chk "config: gate FAILS when CLAUDE.md is deleted" "$?" 1
 cd /; rm -rf "$R"
 
 # ============================================================ gate-neutralization robustness
@@ -249,6 +256,7 @@ cat > migration/parity-matrix.md <<'EOF'
 EOF
 printf 'STATUS: COMPLETE\n\nall rows pass\n' > migration/HANDOFF.md
 git add migration/parity-matrix.md migration/HANDOFF.md >/dev/null 2>&1; git commit -qm h2 >/dev/null
+PROOF   # COMPLETE requires a gate proof matching the final (committed) tree
 out="$(bash migration/tools/check-complete.sh 2>&1)"; rc=$?
 chk "complete: COMPLETE fixture validates" "$rc" 0
 case "$out" in *"STATUS: COMPLETE"*) ok "complete: prints STATUS: COMPLETE";; *) no "complete: prints STATUS: COMPLETE" "$out" "STATUS: COMPLETE";; esac
@@ -256,6 +264,16 @@ bash migration/tools/kick-loop.sh >/dev/null 2>&1
 chk "kick-loop: COMPLETE exits 0" "$?" 0
 out="$(bash migration/tools/kick-loop.sh --check 2>&1)"
 case "$out" in *"done:COMPLETE"*) ok "kick-loop: --check reports done:COMPLETE";; *) no "kick-loop: --check reports done:COMPLETE" "$out" "done:COMPLETE";; esac
+
+# COMPLETE is coupled to a gate proof of the FINAL tree — the no-work-COMPLETE
+# forgery this closes. Board text alone (all audited-pass) is not enough.
+mv .harness/state/gates-passed.diffsha .harness/state/proof.bak
+bash migration/tools/check-complete.sh >/dev/null 2>&1
+chk "complete: COMPLETE with no gate proof is invalid" "$?" 1
+printf 'deadbeef\n' > .harness/state/gates-passed.diffsha
+bash migration/tools/check-complete.sh >/dev/null 2>&1
+chk "complete: COMPLETE with mismatched proof is invalid" "$?" 1
+mv .harness/state/proof.bak .harness/state/gates-passed.diffsha   # restore matching proof
 
 # claim/board mismatch: audited-fail row under a COMPLETE claim is invalid
 sed -i 's/^| F01 | thing | - | - | B01 | audited-pass /| F01 | thing | - | - | B01 | audited-fail /' migration/parity-matrix.md
@@ -315,6 +333,7 @@ EOF
 sed -i '/^## PROPOSAL: widen a gate$/d' migration/PROPOSED-GATE-CHANGES.md
 printf 'STATUS: COMPLETE\n\nspec met\n' > migration/HANDOFF.md
 git add migration/spec-matrix.md migration/PROPOSED-GATE-CHANGES.md migration/HANDOFF.md migration/harness.env >/dev/null 2>&1; git commit -qm h7 >/dev/null
+PROOF   # COMPLETE requires a gate proof matching the final (committed) tree
 bash migration/tools/check-complete.sh >/dev/null 2>&1
 chk "complete: feature profile validates spec-matrix" "$?" 0
 cd /; rm -rf "$R"
@@ -442,6 +461,22 @@ exit 0
 FAKE
 KL --drive --review </dev/null >/dev/null 2>&1
 chk "kick-loop: headless --review stops with 70" "$?" 70
+rm -rf .harness
+
+# The review trigger is not always the HEAD commit: a tick can land audited-fail
+# and THEN a bookkeeping/rename commit. --review must scan the whole tick range,
+# not just HEAD, or it silently sails past the point a human must look.
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+bash migration/tools/gates.sh >/dev/null 2>&1
+printf '\nreview checkpoint\n' >> migration/parity-matrix.md
+git add migration/parity-matrix.md >/dev/null 2>&1
+git commit -qm "migrate T02: audited-fail" >/dev/null 2>&1
+git commit -q --allow-empty -m "chore: bookkeeping after the fail" >/dev/null 2>&1
+exit 0
+FAKE
+KL --drive --review </dev/null >/dev/null 2>&1
+chk "kick-loop: --review fires when audited-fail is NOT the HEAD commit" "$?" 70
 rm -rf .harness
 out="$( ( export HARNESS_MAX_TICKS=1; KL --drive --review-log-only </dev/null 2>&1 ) )"; rc=$?
 chk "kick-loop: --review-log-only continues to budget (0)" "$rc" 0
@@ -653,6 +688,22 @@ rm -f calls.log; rm -rf .harness
 chk "kick-loop: --max overrides harness.env" "$( KL --drive --max 2 >/dev/null 2>&1; echo $? )" 0
 chk "kick-loop: --max tick budget spent (2)" "$(calls)" 2
 rm -f calls.log; rm -rf .harness
+
+# A non-numeric HARNESS_MAX_TICKS previously ran UNBOUNDED: `[ tick -ge abc ]`
+# errored every iteration under set +e and the budget never tripped. It now
+# validates and falls back to 50.
+out="$( HARNESS_MAX_TICKS=abc KL --drive 2>&1 )"; rc=$?
+chk "kick-loop: non-numeric MAX_TICKS terminates (not unbounded)" "$rc" 0
+chk "kick-loop: non-numeric MAX_TICKS falls back to 50 ticks" "$(calls)" 50
+case "$out" in *"is not a number"*) ok "kick-loop: warns on non-numeric MAX_TICKS";; *) no "kick-loop: warns on non-numeric MAX_TICKS" "$out" "is not a number";; esac
+rm -f calls.log; rm -rf .harness
+
+# A non-numeric HARNESS_LOCK_TTL_MIN previously wedged stale-lock recovery forever
+# (`find -mmin +abc` prints nothing). It now validates and falls back to 360; the
+# warning proves the guard ran. --max 1 keeps this a one-tick run.
+out="$( HARNESS_LOCK_TTL_MIN=xyz KL --drive --max 1 2>&1 )"
+case "$out" in *"HARNESS_LOCK_TTL_MIN ('xyz') is not a number"*) ok "kick-loop: warns on non-numeric LOCK_TTL_MIN";; *) no "kick-loop: warns on non-numeric LOCK_TTL_MIN" "$out" "is not a number";; esac
+rm -f calls.log; rm -rf .harness
 cd /; rm -rf "$R"
 
 # ============================================================ precompact checkpoint hook
@@ -712,6 +763,11 @@ chk "persist-state: exits 0" "$?" 0
 out="$(bash migration/tools/read-state.sh mykey 2>/dev/null)"
 case "$out" in *halfway*) ok "read-state: returns persisted value";; *) no "read-state: returns persisted value" "$out" "halfway";; esac
 bash migration/tools/read-state.sh nonexistent 2>/dev/null; chk "read-state: exits 1 on missing key" "$?" 1
+# lossy-sanitised keys that used to collide (foo/bar vs foo_bar) must stay distinct
+echo 'A' | bash migration/tools/persist-state.sh 'foo/bar' >/dev/null 2>&1
+echo 'B' | bash migration/tools/persist-state.sh 'foo_bar' >/dev/null 2>&1
+chk "persist-state: foo/bar round-trips (no collision)" "$(bash migration/tools/read-state.sh 'foo/bar' 2>/dev/null)" "A"
+chk "persist-state: foo_bar round-trips (no collision)" "$(bash migration/tools/read-state.sh 'foo_bar' 2>/dev/null)" "B"
 cd /; rm -rf "$R"
 
 # ============================================================ gates failure feedback
@@ -797,7 +853,7 @@ cd /; rm -rf "$R"
 # ============================================================ SCOPE="." + hostile TMPDIR
 R="$(mkrepo '.')"; cd "$R"
 export TMPDIR=.tmp; mkdir -p .tmp
-bash migration/tools/record-gates.sh
+HARNESS_GATES_ACTIVE=1 bash migration/tools/record-gates.sh
 now="$(bash migration/tools/working-tree-hash.sh)"
 chk "scope-dot: proof stable w/ TMPDIR=.tmp (no self-ref)" "$now" "$(cat .harness/state/gates-passed.diffsha)"
 unset TMPDIR
@@ -819,10 +875,21 @@ chk "frozen: locked hook edit blocks"             "$(FROZEN '.claude/hooks/stop-
 chk "frozen: locked settings edit blocks"         "$(FROZEN '.claude/settings.json')" 2
 chk "frozen: locked harness.env edit blocks"      "$(FROZEN 'migration/harness.env')" 2
 chk "frozen: parity-matrix edit allowed"          "$(FROZEN 'migration/parity-matrix.md')" 0
+# The operating contract and tick prompts are locked (read fresh by every future
+# tick — softening them is cross-tick prompt injection).
+chk "frozen: agent edit of CLAUDE.md blocks"      "$(FROZEN 'CLAUDE.md')" 2
+chk "frozen: agent edit of SINGLE-TICK-PROMPT blocks" "$(FROZEN 'migration/SINGLE-TICK-PROMPT.md')" 2
+chk "frozen: agent edit of LOOP-PROMPT blocks"    "$(FROZEN 'migration/LOOP-PROMPT.md')" 2
+chk "guard: bash write to locked CLAUDE.md blocks" "$(GUARD 'echo x > CLAUDE.md')" 2
 chk "guard: --no-verify blocks"                   "$(GUARD 'git commit --no-verify -m x')" 2
 chk "guard: direct record-gates blocks"           "$(GUARD 'bash migration/tools/record-gates.sh')" 2
 chk "guard: globbed record-gates blocks"          "$(GUARD 'bash migration/tools/record-g*.sh')" 2
+chk "guard: glob record-?ates.sh spelling blocks" "$(GUARD 'bash migration/tools/record-?ates.sh')" 2
+chk "guard: glob record-[g]ates.sh spelling blocks" "$(GUARD 'bash migration/tools/record-[g]ates.sh')" 2
 chk "guard: quoted record-gates spelling blocks"  "$(GUARD 'bash migration/tools/record-gate\"\"s.sh')" 2
+chk "guard: record-gates direct needs sentinel"   "$(cd "$R" && HARNESS_GATES_ACTIVE= bash migration/tools/record-gates.sh >/dev/null 2>&1; echo $?)" 1
+chk "guard: git config core.hooksPath blocks"     "$(GUARD 'git config core.hooksPath .agent-hooks')" 2
+chk "guard: git config alias shell payload blocks" "$(GUARD 'git config alias.x \"!sh -c payload\"')" 2
 chk "guard: redirect write to proof blocks"       "$(GUARD 'echo x > .harness/state/gates-passed.diffsha')" 2
 chk "guard: sed --in-place on proof blocks"       "$(GUARD 'sed --in-place s/a/b/ .harness/state/gates-passed.diffsha')" 2
 chk "guard: cat proof allowed"                    "$(GUARD 'cat .harness/state/gates-passed.diffsha')" 0
@@ -849,6 +916,30 @@ chk "guard: git checkout revert of locked gates blocks" "$(GUARD 'git checkout H
 chk "guard: git restore of locked harness.env blocks"   "$(GUARD 'git restore migration/harness.env')" 2
 chk "guard: chmod -x on locked hook blocks"       "$(GUARD 'chmod -x .claude/hooks/stop-require-gates.sh')" 2
 chk "guard: rm of an UNprotected file allowed"    "$(GUARD 'rm src/scratch.txt')" 0
+
+# terminator-class bypasses: a shell separator butting straight against the
+# pathspec (no space) used to sail past guards that only accepted whitespace/
+# quote/end after the path.
+chk "guard: rm .harness/state;cmd (';' terminator) blocks" "$(GUARD 'rm -rf .harness/state; echo x')" 2
+chk "guard: rm .harness/state&&cmd (no space) blocks"      "$(GUARD 'rm -rf .harness/state&&echo x')" 2
+chk "guard: rm .harness/state|cmd blocks"                  "$(GUARD 'rm -rf .harness/state|cat')" 2
+chk "guard: git add .;cmd blocks"                          "$(GUARD 'git add .; echo x')" 2
+chk "guard: git checkout -- .;cmd blocks"                  "$(GUARD 'git checkout -- .; echo x')" 2
+# trailing-slash HARNESS_LOCKED fragment must also match the no-slash spelling —
+# a natural honest spelling AND a bypass (rm -rf .claude/hooks deletes the dir).
+chk "guard: rm of locked hooks dir (no slash) blocks"      "$(GUARD 'rm -rf .claude/hooks')" 2
+chk "guard: rm of locked tools dir (no slash) blocks"      "$(GUARD 'rm -rf migration/tools')" 2
+# git clean --force (long spelling of -f), and glob / parent-dir reverts that
+# hit locked paths without naming them.
+chk "guard: git clean --force blocks"                      "$(GUARD 'git clean --force')" 2
+chk "guard: git checkout -- * (glob) blocks"               "$(GUARD 'git checkout -- *')" 2
+chk "guard: git checkout HEAD~1 -- migration/ (parent) blocks" "$(GUARD 'git checkout HEAD~1 -- migration/')" 2
+chk "guard: git checkout HEAD -- .claude (parent) blocks"      "$(GUARD 'git checkout HEAD -- .claude')" 2
+chk "guard: explicit-file revert under migration/ allowed"     "$(GUARD 'git checkout HEAD -- migration/parity-matrix.md')" 0
+# quote-concat spelling of --record collapses to the real flag and is blocked.
+chk "guard: check-frozen --rec''ord (quote-concat) blocks"     "$(GUARD "bash migration/tools/check-frozen.sh --rec''ord")" 2
+# --file's argument no longer leaks a -a-shaped token into the staging scan.
+chk "guard: git commit --file with -a-shaped text allowed"     "$(GUARD "git commit --file 'notes about -a flag'")" 0
 
 # The frozen ORACLE was guarded only on the Edit/Write path — Bash never checked
 # it, so a redirect or an rm mutated the reference parity is measured against.
@@ -1209,6 +1300,32 @@ chmod +x "$FAKEBIN/claude"
 KL --drive --max 4 >/dev/null 2>&1
 chk "escalate: tick 2 escalated after the idle tick 1" "$(sed -n 2p .harness/state/models-used)" "opus"
 chk "escalate: tick 3 back to default after progress"  "$(sed -n 3p .harness/state/models-used)" "(default)"
+
+# HARNESS_ESCALATE_AFTER=2 was DEAD CODE: the idle>=2 backstop fired on the same
+# tick that armed escalation, so the escalated tick never ran and the stop message
+# lied. Now two idle ticks arm it and tick 3 runs on the escalation model before
+# the drive stops. Reinstall the always-idle fake and raise the threshold to 2.
+rm -f .harness/state/models-used
+cat > "$FAKEBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+mkdir -p .harness/state
+m="(default)"
+while [ $# -gt 0 ]; do
+  case "$1" in --model) m="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '%s\n' "$m" >> .harness/state/models-used
+bash migration/tools/gates.sh >/dev/null 2>&1
+exit 0
+FAKE
+chmod +x "$FAKEBIN/claude"
+printf 'HARNESS_ESCALATE_AFTER="2"\n' >> migration/harness.env
+out="$( KL --drive 2>&1 )"; rc=$?
+chk "escalate: after=2 stops 64 once the escalated tick ran (was dead code)" "$rc" 64
+chk "escalate: after=2 tick 1 default"                  "$(sed -n 1p .harness/state/models-used)" "(default)"
+chk "escalate: after=2 tick 2 still default (unarmed)"  "$(sed -n 2p .harness/state/models-used)" "(default)"
+chk "escalate: after=2 tick 3 escalated"                "$(sed -n 3p .harness/state/models-used)" "opus"
+chk "escalate: after=2 ran exactly 3 ticks"             "$(wc -l < .harness/state/models-used | tr -d '[:space:]')" "3"
+case "$out" in *"escalated tick on 'opus'"*) ok "escalate: after=2 stop message names the escalated tick";; *) no "escalate: after=2 stop message names the escalated tick" "$out" "escalated tick on 'opus'";; esac
 cd /; rm -rf "$R"
 
 # ==================================================== tracked-but-ignored files

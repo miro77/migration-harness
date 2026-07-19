@@ -132,8 +132,23 @@ function Write-TickPrompt {
         Say 'harness prompt not found (no migration/SINGLE-TICK-PROMPT.md)' 'Red'
         exit 2
     }
-    $body = Get-Content -Path $source -Raw
-    Set-Content -Path $script:TickPromptPath -Value ("<!-- {0} -->`n{1}" -f $script:PromptMarker, $body)
+    # Read/write as UTF-8 explicitly. Get-Content -Raw / Set-Content with no
+    # -Encoding decode a BOM-less UTF-8 file (this prompt) with the system ANSI
+    # codepage on PS 5.1 — byte-preserving on cp1252 but CORRUPTING on DBCS
+    # locales (932/936/949/950). .NET's ReadAllText/WriteAllText with a no-BOM
+    # UTF-8 encoding round-trips the multibyte characters (→, —) intact on every
+    # PowerShell version, and writes no BOM to confuse the CLI reading the prompt.
+    # Resolve to ABSOLUTE paths against PowerShell's location: .NET file APIs use
+    # [Environment]::CurrentDirectory, which PowerShell does NOT keep in sync with
+    # Set-Location, so a relative path would read/write the wrong file.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $sourceAbs = (Resolve-Path $source).ProviderPath
+    $promptAbs = if ([System.IO.Path]::IsPathRooted($script:TickPromptPath)) { $script:TickPromptPath }
+                 else { Join-Path (Get-Location).ProviderPath $script:TickPromptPath }
+    $body = [System.IO.File]::ReadAllText($sourceAbs, [System.Text.Encoding]::UTF8)
+    $promptDir = Split-Path $promptAbs
+    if ($promptDir -and -not (Test-Path $promptDir)) { New-Item -ItemType Directory -Force -Path $promptDir | Out-Null }
+    [System.IO.File]::WriteAllText($promptAbs, ("<!-- {0} -->`n{1}" -f $script:PromptMarker, $body), $utf8NoBom)
 }
 
 function Exit-ExistingHandoff {
@@ -249,15 +264,37 @@ if (-not (Test-Path 'migration\tools\kick-loop.sh')) {
 }
 Write-TickPrompt
 
-# A tick left running by an earlier, killed driver will race this one.
-Stop-Orphans 'pre-existing, from an earlier run' | Out-Null
-
+# The driver lock. kick-loop.sh OWNS it (atomic mkdir + a heartbeat that keeps the
+# mtime fresh while it runs + TTL recovery of a lock left by a crashed run). The
+# old preflight hard-`exit 2` on the lock's mere presence fired BEFORE kick-loop's
+# recovery could ever run, so one SIGKILLed driver wedged every future scheduled
+# fire FOREVER (RESUMING.md recommends this script for scheduled runs). Instead,
+# decide by LIVENESS the same way kick-loop does: a lock whose mtime is younger
+# than the TTL is a live concurrent driver (its heartbeat keeps it fresh) — refuse
+# a second supervisor, and crucially do NOT reap its tick. A lock older than the
+# TTL (a crashed driver whose heartbeat stopped) is stale — fall through, reap any
+# genuinely-dead leftover, and let kick-loop recover it. This turns "wedged
+# forever" into "auto-recovers after the TTL", consistent with kick-loop itself.
 $lock = '.harness\kick-loop.lock'
-if (Test-Path $lock) {
-    Say "a driver already holds $lock -- refusing to start a second one" 'Red'
-    Say '  if you are certain none is running: Remove-Item -Recurse .harness\kick-loop.lock' 'Gray'
-    exit 2
+$ttlMin = 360
+if (Test-Path 'migration\harness.env') {
+    $ttlMatch = Select-String -Path 'migration\harness.env' -Pattern '^\s*HARNESS_LOCK_TTL_MIN\s*=\s*"?([0-9]+)' | Select-Object -First 1
+    if ($ttlMatch) { $ttlMin = [int]$ttlMatch.Matches[0].Groups[1].Value }
 }
+if (Test-Path $lock) {
+    $lockAgeMin = (New-TimeSpan -Start (Get-Item $lock).LastWriteTime -End (Get-Date)).TotalMinutes
+    if ($lockAgeMin -lt $ttlMin) {
+        Say ("a live driver already holds $lock (age {0:N0}m < {1}m TTL) -- refusing to start a second one" -f $lockAgeMin, $ttlMin) 'Red'
+        Say '  if you are certain none is running: Remove-Item -Recurse .harness\kick-loop.lock' 'Gray'
+        exit 2
+    }
+    Say "$lock is older than ${ttlMin}m -- treating it as a crashed driver's leftover; kick-loop.sh will recover it." 'Yellow'
+}
+
+# Safe to proceed: reap any genuinely-dead leftover tick (the live-lock case above
+# already exited, so this never kills a concurrent supervisor's tick), then let
+# kick-loop take or recover the lock.
+Stop-Orphans 'pre-existing, from an earlier run' | Out-Null
 
 if (Test-Path 'migration\HANDOFF.md') {
     Exit-ExistingHandoff

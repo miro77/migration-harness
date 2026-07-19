@@ -23,8 +23,17 @@ key="${1:?usage: persist-state.sh <key>  (reads value from stdin)}"
 # Sanitise: keep alnum, dash, underscore, dot; replace everything else.
 safe=$(printf '%s' "$key" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')
 [ -n "$safe" ] || { echo "persist-state: key sanitised to empty — use a meaningful key" >&2; exit 1; }
+# Disambiguate LOSSY sanitisation: 'foo/bar' and 'foo_bar' both sanitise to
+# 'foo_bar' and would share one file, silently clobbering each other. When the
+# sanitised form differs from the raw key, suffix a short hash of the RAW key so
+# distinct keys never collide. Already-safe keys keep their bare name (and
+# read-state.sh applies the identical rule, so the round-trip matches).
+[ "$safe" = "$key" ] || safe="${safe}.$(printf '%s' "$key" | cksum | cut -d' ' -f1)"
 
 dir=.harness/state/slice-state
 mkdir -p "$dir"
-cat > "$dir/$safe"
+# Atomic write: a concurrent read-state must never see a half-written value.
+tmp="$dir/.$safe.tmp.$$"
+cat > "$tmp"
+mv -f "$tmp" "$dir/$safe"
 printf 'persisted: %s\n' "$dir/$safe" >&2

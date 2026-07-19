@@ -150,6 +150,11 @@ promptext="$(cat "$prompt")" || { echo "kick-loop: could not read $prompt" >&2; 
 # behind, so recover one older than the TTL instead of wedging every future fire.
 lock=".harness/kick-loop.lock"
 ttl_min="${HARNESS_LOCK_TTL_MIN:-360}"
+# Validate: a non-numeric TTL makes `find -mmin +"$ttl_min"` error to the
+# discarded stderr and print nothing, so stale-lock recovery can NEVER trigger —
+# a crashed run's leftover lock then wedges every future fire (exit 0, skipping)
+# forever. Fall back to 360.
+case "$ttl_min" in ''|*[!0-9]*) echo "kick-loop: HARNESS_LOCK_TTL_MIN ('$ttl_min') is not a number — using 360." >&2; ttl_min=360 ;; esac
 mkdir -p .harness
 if ! mkdir "$lock" 2>/dev/null; then
   if [ -n "$(find "$lock" -maxdepth 0 -mmin +"$ttl_min" 2>/dev/null)" ]; then
@@ -326,6 +331,10 @@ fi
 # designed termination path; the signature comparison below is a driver-side
 # backstop for a model that fails to keep that bookkeeping.
 max_ticks="${max_arg:-${HARNESS_MAX_TICKS:-50}}"
+# Validate like escalate_after does. A non-numeric HARNESS_MAX_TICKS would make
+# `[ "$tick" -ge "$max_ticks" ]` error every iteration under `set +e`: the test
+# is false, the budget never trips, and the drive runs UNBOUNDED. Fall back to 50.
+case "$max_ticks" in ''|*[!0-9]*) echo "kick-loop: HARNESS_MAX_TICKS ('$max_ticks') is not a number — using 50." >&2; max_ticks=50 ;; esac
 idle=0; tick=0
 
 # Cross-model escalation (opt-in): after this many consecutive no-progress ticks,
@@ -333,7 +342,7 @@ idle=0; tick=0
 escalate_model="${HARNESS_ESCALATE_MODEL:-}"
 escalate_after="${HARNESS_ESCALATE_AFTER:-1}"
 case "$escalate_after" in ''|*[!0-9]*) escalate_after=1 ;; esac
-next_model=""
+next_model=""; escalated_ran=0
 while :; do
   if [ "$tick" -ge "$max_ticks" ]; then
     echo "kick-loop: tick budget spent ($max_ticks ticks) — state is checkpointed on disk; re-run to continue."
@@ -342,6 +351,10 @@ while :; do
   tick=$((tick+1))
   touch "$lock" 2>/dev/null || true   # keep the lock's TTL fresh across a long drive
   before="$(tree_sig)"
+  head_before="$(git rev-parse HEAD 2>/dev/null || true)"
+  # Did THIS tick run on the escalated model? next_model is armed at the end of a
+  # previous no-progress iteration and consumed by run_once at the top of this one.
+  tick_escalated=0; [ -n "$next_model" ] && tick_escalated=1
   echo "kick-loop: tick $tick (fresh context)"
   run_once; rc=$?
   if [ -e "$done_marker" ]; then
@@ -366,7 +379,12 @@ while :; do
   # audited-fail or a row-split — the moments a human should look before
   # the loop advances. On a TTY it waits for input; headless it logs.
   if [ "$review" -eq 1 ]; then
-    subject=$(git log -1 --format=%s 2>/dev/null || true)
+    # Scan EVERY commit the tick landed, not just HEAD: a tick can land the
+    # audited-fail / row-split commit and THEN another (the rule-8 rename+content
+    # pair, or bookkeeping), which would hide the review trigger behind HEAD and
+    # let the loop sail past the exact point a human must look.
+    if [ -n "$head_before" ]; then range="$head_before..HEAD"; else range="HEAD"; fi
+    subject=$(git log --format=%s "$range" 2>/dev/null | grep -m1 -E 'audited-fail|split into sub-slices' || true)
     case "$subject" in
       *audited-fail*|*"split into sub-slices"*)
         if [ -t 0 ]; then
@@ -385,6 +403,7 @@ while :; do
   fi
   if [ "$(tree_sig)" = "$before" ]; then
     idle=$((idle+1))
+    [ "$tick_escalated" -eq 1 ] && escalated_ran=1
     # Cross-model escalation. A model that is stuck tends to stay stuck in the
     # same way, and a fresh context of the SAME model is still the same model —
     # the fresh-context tick buys independence from the conversation, not from
@@ -393,24 +412,31 @@ while :; do
     # adversarial review found four blockers that the internal fresh-context
     # audit had passed.)
     #
-    # Escalation gets exactly one tick before the idle backstop fires. That is
-    # deliberate: if two DIFFERENT models both make no progress, the problem is
-    # not the model, and a human should look.
+    # Escalation gets exactly one tick before the drive stops. Arm it once idle
+    # reaches HARNESS_ESCALATE_AFTER; the NEXT tick runs on $escalate_model.
     if [ -n "$escalate_model" ] && [ "$escalate_after" -gt 0 ] \
-       && [ "$idle" -ge "$escalate_after" ] && [ -z "$next_model" ]; then
+       && [ "$idle" -ge "$escalate_after" ] && [ -z "$next_model" ] && [ "$escalated_ran" -eq 0 ]; then
       next_model="$escalate_model"
       echo "kick-loop: $idle consecutive tick(s) changed nothing — escalating the next tick to model '$escalate_model'."
     fi
-    if [ "$idle" -ge 2 ]; then
-      if [ -n "$escalate_model" ]; then
-        echo "kick-loop: two consecutive ticks changed nothing (the second on '$escalate_model') and no $done_marker was written — two different models made no progress, so this is not a model problem. Stopping; inspect." >&2
-      else
+    # Backstop. WITHOUT escalation: stop after two idle ticks. WITH escalation:
+    # do NOT stop on the raw idle count — that would fire before the escalated
+    # tick ever ran (the bug that made HARNESS_ESCALATE_AFTER>=2 dead code and
+    # printed a false "second on <model>" message). Stop only once the escalated
+    # tick has actually had its one shot and still made no progress: two DIFFERENT
+    # models failing is not a model problem, and a human should look.
+    if [ -z "$escalate_model" ]; then
+      if [ "$idle" -ge 2 ]; then
         echo "kick-loop: two consecutive ticks changed nothing and no $done_marker was written — stopping this drive; inspect." >&2
+        exit 64
       fi
+    elif [ "$escalated_ran" -eq 1 ]; then
+      echo "kick-loop: the escalated tick on '$escalate_model' also changed nothing and no $done_marker was written — two different models made no progress, so this is not a model problem. Stopping; inspect." >&2
       exit 64
     fi
   else
     idle=0
     next_model=""     # progress: back to the session default model
+    escalated_ran=0   # a later stall re-arms escalation from scratch
   fi
 done

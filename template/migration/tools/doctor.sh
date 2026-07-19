@@ -31,6 +31,32 @@ else
   echo "gates.sh     : configured"
 fi
 
+# Locked-tooling integrity baseline (opt-in hardening: once recorded, any bypass
+# of the action guards that mutates a gate/hook/config fails the gate).
+if [ -f migration/locked-baseline.sha ]; then
+  echo "locked base  : recorded (check-locked.sh enforces tooling integrity)"
+else
+  echo "locked base  : NOT recorded — the harness's own gates/hooks/config have no integrity baseline. As a human, after configuring gates.sh: bash migration/tools/check-locked.sh --record && git add migration/locked-baseline.sha"
+fi
+
+# Degraded enforcement looks identical to healthy from the outside: a hook that
+# fails to PARSE silently never fires, and if 'bash' is off PATH the hooks cannot
+# run at all. Exercise the machinery so a broken install is visible, not silent.
+if command -v bash >/dev/null 2>&1; then
+  _bad=""
+  for _h in .claude/hooks/*.sh migration/tools/*.sh; do
+    [ -f "$_h" ] || continue
+    bash -n "$_h" 2>/dev/null || _bad="$_bad $_h"
+  done
+  if [ -n "$_bad" ]; then
+    echo "hooks/tools  : SYNTAX ERROR in$_bad — enforcement is DEGRADED (a hook that does not parse does not run). Fix before relying on the harness."
+  else
+    echo "hooks/tools  : parse OK"
+  fi
+else
+  echo "hooks/tools  : cannot verify — 'bash' is not on PATH, so the hooks cannot run at all."
+fi
+
 # Consumer-build seam: is anything wired between the CONSUMER-BUILD markers?
 # (Empty is fine — only matters if a consumer resolves your source by path.)
 if awk '/# HARNESS:CONSUMER-BUILD-START/{f=1;next} /# HARNESS:CONSUMER-BUILD-END/{f=0}

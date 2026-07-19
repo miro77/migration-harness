@@ -142,6 +142,29 @@ elif [ "$n_block" -gt 0 ] || [ "$n_ledger_blocked" -gt 0 ] || [ "$n_ledger_open"
 else
   actual="COMPLETE"
 fi
+
+# COMPLETE means "the work is done" — the strongest claim the harness makes, and
+# the one an agent gains the most by forging (mark every row audited-pass on a
+# board it never gated, write a COMPLETE handoff, stop). The board counts above
+# are all agent-writable text. So COMPLETE additionally REQUIRES that the current
+# tree is covered by a real gate proof: the recorded gates-passed.diffsha must
+# equal this tree's hash. Without it, "done" rests only on prose. (BLOCKED/FAILED
+# do not require this — they are "a human must look" states, and the between-slice
+# Stop-hook proof already governs the commits that got here.)
+if [ "$actual" = "COMPLETE" ]; then
+  proof=.harness/state/gates-passed.diffsha
+  if [ ! -f "$proof" ]; then
+    fail "boards say COMPLETE but no gate proof exists ($proof is missing) — the final tree was never gated. Run: bash migration/tools/gates.sh"
+  fi
+  current_hash="$(bash migration/tools/working-tree-hash.sh 2>/dev/null)"
+  recorded_hash="$(tr -d '[:space:]' < "$proof" 2>/dev/null)"
+  if [ -z "$current_hash" ]; then
+    fail "boards say COMPLETE but the working-tree hash could not be computed (working-tree-hash.sh failed) — cannot confirm the tree is gated."
+  fi
+  if [ "$current_hash" != "$recorded_hash" ]; then
+    fail "boards say COMPLETE but the current tree is NOT covered by a gate proof (recorded=$recorded_hash current=$current_hash). A COMPLETE claim must sit on a real gate run of the final tree. Run: bash migration/tools/gates.sh"
+  fi
+fi
 [ "$claimed" = "$actual" ] \
   || fail "$handoff claims STATUS: $claimed but the boards say $actual (audited-fail=$n_fail blocked-rows=$n_block ledger-blocked=$n_ledger_blocked ledger-open=$n_ledger_open open-proposals=$n_props)"
 

@@ -98,6 +98,16 @@ while IFS="$(printf '\t')" read -r id status; do
   [ -n "$id" ] || continue
   [ "$status" = "audited-pass" ] || continue
 
+  # The id becomes a path below (.harness/state/audits/$id). record-audit.sh
+  # only ever writes ids matching [A-Za-z0-9._-]; a board id with anything else
+  # (notably '/') could resolve a record OUTSIDE the audits dir. Refuse it — an
+  # audited-pass row whose id we cannot safely resolve is unbacked, not passing.
+  case "$id" in
+    *[!A-Za-z0-9._-]*)
+      echo "check-audits: row id '$id' has characters outside [A-Za-z0-9._-]; refusing to resolve its audit record (record-audit.sh would reject the same id). Fix the board id." >&2
+      rc=1; continue ;;
+  esac
+
   # Already audited-pass at the last gate run -> went through this gate then.
   was="$(printf '%s\n' "$prev" | awk -F'\t' -v k="$id" '$1==k {print $2; exit}')"
   [ "$was" = "audited-pass" ] && continue

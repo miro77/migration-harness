@@ -45,7 +45,7 @@ printf 'class A{}\n'  > legacy/src/A.java
 printf 'seed\n'       > src/a.txt
 printf 'placeholder\n'> CLAUDE.md
 printf '.harness/\n'  > .gitignore
-printf 'HARNESS_SCOPE="src"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json migration/harness.env migration/frozen-baseline.sha"\n' > migration/harness.env
+printf 'HARNESS_SCOPE="src"\nHARNESS_FROZEN="legacy/src"\nHARNESS_LOCKED="migration/tools/ .claude/hooks/ .claude/settings.json migration/harness.env migration/frozen-baseline.sha migration/locked-baseline.sha"\n' > migration/harness.env
 
 # Baseline the frozen oracle, exactly as a human does once before slice 1. Without
 # it check-frozen.sh fails the gate closed — an unverified oracle is UNPROVEN, not
@@ -63,6 +63,13 @@ bash migration/tools/check-frozen.sh --record >/dev/null 2>&1 \
 sed -i '/# HARNESS:PROJECT-GATES-START/,/# HARNESS:PROJECT-GATES-END/c\test ! -e src/BROKEN || fail "BROKEN marker present"' migration/tools/gates.sh
 grep -q 'BROKEN marker present' migration/tools/gates.sh || { echo "e2e SETUP FAILED: gate not neutralized (missing HARNESS:PROJECT-GATES markers?)" >&2; exit 1; }
 grep -q 'record-gates.sh'      migration/tools/gates.sh || { echo "e2e SETUP FAILED: record-gates line was removed" >&2; exit 1; }
+
+# Baseline the locked tooling AFTER the real gate is wired in (so the configured
+# gates.sh is what the baseline pins), exactly as a human does after configuring
+# gates.sh for their stack. From here, any drift in the harness's own
+# gates/hooks/config fails the gate.
+bash migration/tools/check-locked.sh --record >/dev/null 2>&1 \
+  || { echo "e2e SETUP FAILED: could not record the locked-tooling baseline" >&2; exit 1; }
 
 git add -A; git commit -qm init >/dev/null
 
@@ -93,6 +100,17 @@ chk "e2e: stop allows after re-gate"            "$(STOP)" 0
 # 5. committing the gated content still allows (content-addressed, commit-invariant)
 git add -A; git commit -qm "migrate S01: audited-pass" >/dev/null
 chk "e2e: stop allows after committing gated content" "$(STOP)" 0
+
+# 6. locked-tooling integrity: neutering a gate fails the gate at check-locked,
+#    even though the (fake) project gate would still 'pass'. This is the bypass
+#    the action guards can't see (simulated here by a direct write, as an
+#    interpreter/subagent would do). Restore afterwards so the tree is clean.
+cp migration/tools/gates.sh "$T/e2e-gates.orig"
+printf '\n# tampered\n' >> migration/tools/gates.sh
+chk "e2e: gate FAILS when locked tooling drifts"  "$(GATE)" 1
+has "check-locked" "$(bash migration/tools/gates.sh 2>&1)" "e2e: failure names check-locked"
+cp "$T/e2e-gates.orig" migration/tools/gates.sh
+chk "e2e: gate passes again after restoring tooling" "$(GATE)" 0
 
 echo "----------------------------------------"
 echo "e2e smoke: $pass passed, $fail failed"

@@ -37,6 +37,12 @@ if [ ! -f migration/parity-matrix.md ] && [ ! -f migration/spec-matrix.md ]; the
   fail "missing status matrix (expected migration/parity-matrix.md or migration/spec-matrix.md)"
 fi
 
+# The operating contract itself must exist. The placeholder check below uses
+# `grep ... CLAUDE.md` which SILENTLY PASSES on a missing file (grep exits 2, the
+# condition is false), so a deleted CLAUDE.md would otherwise sail through the
+# gate. A contract that is not on disk is not a configured contract.
+[ -f CLAUDE.md ] || fail "CLAUDE.md (the operating contract) is missing — restore it. A deleted contract is not a pass."
+
 # An unconfigured harness must not report a green slice. Fail while ship-time
 # placeholders remain in CLAUDE.md: multi-letter ALL-CAPS tokens (<PROJECT>,
 # <LEGACY STACK>), the template's path tokens (<legacy-paths>, <target-paths>,
@@ -62,6 +68,15 @@ bash migration/tools/check-docs.sh CLAUDE.md AGENTS.md migration >&2 \
 # behind the guards' back. No-op when HARNESS_FROZEN is empty (in-place profile).
 bash migration/tools/check-frozen.sh >&2 \
   || fail "frozen oracle failed integrity check (migration/tools/check-frozen.sh) — the reference parity is measured against has moved, or was never baselined. No gate run is trustworthy until it is restored."
+
+# Locked-tooling integrity. Same outcome-check, pointed at the harness's OWN
+# gates/hooks/config (HARNESS_LOCKED): the PreToolUse hooks block the actions
+# that would neuter a gate, this catches the bypass (an interpreter write, a
+# subagent, an odd path spelling) at gate time by hashing the enforcement files
+# against migration/locked-baseline.sha. No-op when HARNESS_LOCKED is empty; a
+# human records the baseline once during bootstrap.
+bash migration/tools/check-locked.sh >&2 \
+  || fail "locked tooling failed integrity check (migration/tools/check-locked.sh) — the harness's own gates/hooks/config have moved, or were never baselined. A 'pass' recorded against altered enforcement proves nothing. Restore them, or (as a human) record the baseline."
 
 # Hard rule 10, mechanically. A row may not become `audited-pass` on the board
 # unless the fresh-context auditor actually ran and recorded a pass for THIS code.
@@ -173,7 +188,12 @@ fail "unconfigured gates (this failure is intentional until you edit gates.sh)"
 bash migration/tools/check-stubs.sh >&2 \
   || fail "unregistered runtime stub(s) — see above (register in migration/integration-ledger.md, or wire the feature so the stub is gone)"
 
-bash migration/tools/record-gates.sh \
+# HARNESS_GATES_ACTIVE is the sentinel record-gates.sh requires: it is set ONLY
+# here, on the one legitimate path (gates ran and passed). Defense-in-depth, not
+# a boundary — an agent can prepend the same assignment — but it forces any
+# forgery to name the sentinel, which is conspicuous in telemetry and blocked by
+# the record-gates name guards in command-guard.sh anyway.
+HARNESS_GATES_ACTIVE=1 bash migration/tools/record-gates.sh \
   || fail "all gates PASSED but the proof could NOT be recorded (working-tree-hash refused; likely a HARNESS_SCOPE entry it cannot stage - see the error above). The Stop hook will hold turns until this is fixed."
 rm -f "$_failfile"
 echo "GATES PASSED - proof recorded in .harness/state/gates-passed.diffsha"

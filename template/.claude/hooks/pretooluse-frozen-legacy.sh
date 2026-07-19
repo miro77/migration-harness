@@ -47,6 +47,14 @@ case "$norm" in
     ;;
 esac
 
+# From here down, match paths CASE-INSENSITIVELY. On a case-folding filesystem
+# (Windows/macOS) a Write to .harness/state/GATES-PASSED.diffsha lands on the
+# same file the Stop hook reads as gates-passed.diffsha — a case-sensitive guard
+# is a documented forgery route (write the proof via Edit/Write, no Bash). The
+# path-scoping above stays case-exact on purpose; only the protective
+# proof/locked/frozen matches below fold case.
+shopt -s nocasematch
+
 # The gate-proof state — the content hash AND the board snapshots
 # (gates-passed.*) that check-audits.sh compares against — is written only by
 # gates.sh on a real pass, never by hand. Match on the (unique) filename prefix
@@ -62,6 +70,7 @@ esac
 # Locked enforcement files: the harness's own gates/hooks/config. Blocking the
 # Edit/Write path here; pretooluse-command-guard.sh blocks the Bash-write path.
 for frag in ${HARNESS_LOCKED:-}; do
+  frag="${frag%/}"
   case "$norm" in
     *"$frag"*)
       echo "Blocked: '$frag' is a LOCKED harness enforcement file (HARNESS_LOCKED) — the agent must not weaken its own gates/hooks/config. A human edits these outside the agent session. See CLAUDE.md." >&2
@@ -70,6 +79,7 @@ for frag in ${HARNESS_LOCKED:-}; do
 done
 
 for frag in ${HARNESS_FROZEN:-}; do
+  frag="${frag%/}"
   case "$norm" in
     *"$frag"*)
       echo "Blocked: '$frag' is FROZEN legacy oracle source — it must stay byte-identical to remain a trustworthy migration reference. New probe/adapter code goes in probes/. See CLAUDE.md hard rule 1." >&2

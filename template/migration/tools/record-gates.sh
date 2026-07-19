@@ -3,6 +3,19 @@
 # Called by gates.sh ONLY after all gates succeeded. The Stop hook compares
 # against this. Never call manually to fake a pass — that defeats the harness.
 set -euo pipefail
+
+# Defense-in-depth: this script writes the gate proof and must run only from
+# gates.sh, which sets HARNESS_GATES_ACTIVE=1 after every gate has passed. A
+# direct invocation (the shortest forgery: write a valid-looking proof without
+# running the gates) is missing the sentinel and refused here. This is NOT a
+# security boundary — an agent can prepend `HARNESS_GATES_ACTIVE=1` — it is a
+# tripwire that makes the honest-mistake and the lazy-forgery cases fail loudly;
+# the command-guard name/glob guards are what stop the deliberate call.
+if [ "${HARNESS_GATES_ACTIVE:-}" != "1" ]; then
+  echo "record-gates: refusing to write the gate proof — this script is called only by gates.sh after the gates pass, never directly. Run: bash migration/tools/gates.sh" >&2
+  exit 1
+fi
+
 cd "$(git rev-parse --show-toplevel)"
 mkdir -p .harness/state
 bash migration/tools/working-tree-hash.sh > .harness/state/gates-passed.diffsha

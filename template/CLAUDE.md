@@ -101,8 +101,14 @@ must respect rather than route around:
   `.claude/settings*.json`, `migration/harness.env` — are **locked**
   (`HARNESS_LOCKED`). Never weaken your own gates: editing `gates.sh` to a no-op
   and then recording a "pass" is the exact bypass these locks exist to stop.
-  Unlike the frozen oracle, these files do not have a committed integrity
-  baseline checked by `gates.sh`; the lock is an action guard. If a gate genuinely
+  Like the frozen oracle, these files can be given a committed integrity baseline:
+  a human runs `bash migration/tools/check-locked.sh --record` once during
+  bootstrap, and `gates.sh` then hashes the locked fileset against
+  `migration/locked-baseline.sha` on every run — so a bypass of the action guard
+  (an interpreter write, a subagent, an odd path spelling) that mutates a gate is
+  caught at the next gate, not silently trusted. It is opt-in by presence (absent
+  baseline = action-guard only, today's behavior); `doctor.sh` reports whether it
+  is recorded. If a gate genuinely
   needs to change (e.g. a missing consumer-build check), do NOT route around the
   lock and do NOT leave it as an ad-hoc note: record the exact proposed edit in
   [`migration/PROPOSED-GATE-CHANGES.md`](migration/PROPOSED-GATE-CHANGES.md)
