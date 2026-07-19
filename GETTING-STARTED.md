@@ -130,19 +130,33 @@ permission dialog, so a missing rule parks or fails the run instead of asking.
 Two ways to add the Edit/Write (and fixture-generator) rules:
 
 - **Apply the shipped patch.** Fill the `<TARGET_TREE>`,
-  `<FIXTURE_GENERATOR>`, and `<RUN_FIXTURE_GENERATOR>` placeholders in
-  `settings-permissions.patch`, then from the repo root:
+  `<FIXTURE_GENERATOR>`, `<RUN_FIXTURE_GENERATOR>`, and `<BUILD_TEST_CMD>`
+  placeholders in `settings-permissions.patch`, then from the repo root:
   `git apply settings-permissions.patch`. It adds Edit/Write allows for
-  `migration/` and your target tree, plus a Bash allow for running the
-  fixture generator.
+  `migration/` and your target tree, a Bash allow for the fixture generator,
+  and a Bash allow for your build/test tool (`<BUILD_TEST_CMD>` → e.g.
+  `cargo`, `npm`, `go`).
 - **Or hand-edit** `permissions.allow` in `.claude/settings.json` to the same
   effect.
 
-Either way, also add your stack's build/test/format commands (the ones every
-tick repeats) to `permissions.allow`. Do this as a human, or during the
-install session: `.claude/settings.json` is `HARNESS_LOCKED`, so once the
-hooks are armed the agent cannot widen its own permissions — see the
-bootstrap-window note below.
+Two easy-to-miss cases `doctor.sh` now flags for you:
+
+- **The build/test tool must be allow-listed for DIRECT use.** The gate runs it
+  via `bash migration/tools/gates.sh` (already allowed), but every tick also
+  runs `cargo build`/`npm test`/… directly while iterating — each parks the
+  loop if `Bash(cargo:*)` (etc.) isn't allowed. Add one `Bash(<tool>:*)` per
+  tool the patch's single `<BUILD_TEST_CMD>` slot doesn't cover.
+- **Root manifests live OUTSIDE your target tree.** `Edit(<TARGET_TREE>/**)`
+  does not cover a repo-root `Cargo.toml` / `package.json` / `go.mod` /
+  `pyproject.toml`, so creating or editing it parks the loop. Either add an
+  explicit `Edit`/`Write` rule for the manifest, or put your target crate in a
+  subdirectory so one glob covers it.
+
+Do this as a human, or during the install session: `.claude/settings.json` is
+`HARNESS_LOCKED`, so once the hooks are armed the agent cannot widen its own
+permissions — see the bootstrap-window note below. `bash migration/tools/doctor.sh`
+warns when a configured gate command isn't allow-listed, so run it before your
+first unattended tick.
 
 ## 6. Fill in the placeholders
 
@@ -159,7 +173,7 @@ remains.
 - `migration/SINGLE-TICK-PROMPT.md` and `migration/LOOP-PROMPT.md` —
   legacy/target names in the driver prompts.
 - `settings-permissions.patch` — `<TARGET_TREE>`, `<FIXTURE_GENERATOR>`,
-  `<RUN_FIXTURE_GENERATOR>` (fill before `git apply`, step 5).
+  `<RUN_FIXTURE_GENERATOR>`, `<BUILD_TEST_CMD>` (fill before `git apply`, step 5).
 
 ## 7. Optional: tighten the command guard
 

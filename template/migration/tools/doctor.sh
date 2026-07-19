@@ -77,6 +77,47 @@ else
   echo "ship build   : none (wire your app's production compile — e.g. flutter build web --wasm — unless this migration ships no separately-built app)"
 fi
 
+# Held-out parity: the strongest gate against a port overfit to the COMMITTED
+# fixtures (fresh oracle vectors, generated at gate time, that the port never
+# saw). Opt-in — but if a frozen oracle is configured and holdout is off, that
+# is the case where it matters most, so surface the decision rather than let it
+# pass silently (a real migration shipped without it because nobody chose).
+if [ "${HARNESS_HOLDOUT:-}" = "on" ]; then
+  echo "holdout      : ON (fresh oracle vectors checked at gate time)"
+elif [ -n "${HARNESS_FROZEN:-}" ]; then
+  echo "holdout      : off — a frozen oracle is configured but held-out parity is not. If the oracle is DETERMINISTIC (same input → same output), enable it (HARNESS_HOLDOUT=on + wire check-holdout.sh) once the port's compare step exists — it is the strongest gate against overfitting to the committed fixtures. Record the decision either way."
+else
+  echo "holdout      : off (no frozen oracle — fine)"
+fi
+
+# Permission allow-list vs. the configured gate commands. An unattended --drive
+# tick that runs the build/test tool DIRECTLY (e.g. `cargo build`) parks on a
+# permission prompt when it is not pre-authorized — a SILENT stall that hangs
+# the driver. Flag any common build tool named in the gate blocks that is not
+# allow-listed in .claude/settings.json. Advisory (permissions are not a
+# correctness gate) and stack-agnostic (a curated tool list, nothing per-project
+# hardcoded). This is the gap that made a real bootstrap ready-to-park.
+_settings=.claude/settings.json
+if [ -f "$_settings" ]; then
+  _gateblocks="$(awk '
+    /# HARNESS:(PROJECT-GATES|SHIP-BUILD|CONSUMER-BUILD)-START/{f=1;next}
+    /# HARNESS:(PROJECT-GATES|SHIP-BUILD|CONSUMER-BUILD)-END/{f=0}
+    f && $0 !~ /^[[:space:]]*#/' migration/tools/gates.sh 2>/dev/null)"
+  _missing=""
+  for _t in cargo rustc rustfmt npm pnpm yarn node deno bun go gofmt dart flutter \
+            python python3 pytest ruff mypy tox poetry uv mvn gradle gradlew make \
+            cmake ninja dotnet swift clang gcc g++ cc; do
+    printf '%s' "$_gateblocks" | grep -qwF "$_t" || continue
+    grep -qE "\"Bash\\(${_t}[ :]" "$_settings" 2>/dev/null && continue
+    _missing="$_missing $_t"
+  done
+  if [ -n "$_missing" ]; then
+    echo "permissions  : gate command(s)$_missing named in gates.sh are NOT pre-authorized in $_settings — an unattended --drive tick that runs one directly parks on a permission prompt (a silent stall). Add e.g. \"Bash(cargo:*)\" per tool to permissions.allow, and allow-list any ROOT manifest (Cargo.toml, package.json, go.mod, pyproject.toml) your target-tree rule does not already cover."
+  else
+    echo "permissions  : configured gate commands look allow-listed (no obvious parking risk)"
+  fi
+fi
+
 # Runtime-stub gate + integration ledger (reachability tracking).
 if [ -n "${STUB_SENTINEL:-}" ]; then
   if [ -f migration/integration-ledger.md ]; then

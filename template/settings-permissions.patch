@@ -1,6 +1,6 @@
 --- a/.claude/settings.json
 +++ b/.claude/settings.json
-@@ -11,7 +11,14 @@
+@@ -11,7 +11,15 @@
        "Bash(bash migration/tools/working-tree-hash.sh:*)",
        "Bash(bash migration/tools/persist-state.sh:*)",
        "Bash(bash migration/tools/read-state.sh:*)",
@@ -12,7 +12,8 @@
 +      "Write(<TARGET_TREE>/**)",
 +      "Edit(<FIXTURE_GENERATOR>/**)",
 +      "Write(<FIXTURE_GENERATOR>/**)",
-+      "Bash(<RUN_FIXTURE_GENERATOR>:*)"
++      "Bash(<RUN_FIXTURE_GENERATOR>:*)",
++      "Bash(<BUILD_TEST_CMD>:*)"
      ]
    },
    "hooks": {

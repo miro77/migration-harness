@@ -1162,6 +1162,26 @@ chk "doctor: read-only (tree hash unchanged)" "$after" "$before"
 out="$(bash migration/tools/doctor.sh 2>&1)"
 has "placeholders : REMAIN" "$out" "doctor: lowercase shipped placeholders reported"
 has "legacy-runtime.md" "$out" "doctor: placeholder report names legacy-runtime.md"
+# holdout visibility: mkrepo sets HARNESS_FROZEN, so an off holdout must be
+# surfaced as a decision (the gap a real bootstrap shipped without noticing).
+out="$(bash migration/tools/doctor.sh 2>&1)"
+has "holdout      : off — a frozen oracle" "$out" "doctor: nudges when frozen oracle but holdout off"
+# permission parking check: a build tool named in the gates that is NOT
+# allow-listed for direct use would park an unattended tick. Inject one and
+# confirm doctor flags it, then clears once allow-listed.
+# inject into the SHIP-BUILD block (mkrepo neuters PROJECT-GATES' markers but
+# leaves SHIP-BUILD's intact, and doctor scans that block too).
+sed -i '/# HARNESS:SHIP-BUILD-START/a cargo build --release || fail y' migration/tools/gates.sh
+out="$(bash migration/tools/doctor.sh 2>&1)"
+has "permissions  : gate command(s) cargo" "$out" "doctor: flags un-allow-listed gate command (parking risk)"
+python3 - <<'PY'
+import json
+p=".claude/settings.json"; d=json.load(open(p))
+d["permissions"]["allow"].append("Bash(cargo:*)")
+json.dump(d, open(p,"w"), indent=2)
+PY
+out="$(bash migration/tools/doctor.sh 2>&1)"
+has "permissions  : configured gate commands look allow-listed" "$out" "doctor: clears once gate command is allow-listed"
 cd /; rm -rf "$R"
 
 # ==================================================== frozen-oracle integrity
