@@ -203,10 +203,13 @@
   </header>
   <p class="lead">
     Tick the kind of work you're starting and say where you're going — the one
-    thing the repo can't reveal. It assembles the starting prompt to paste into
-    a fresh Claude&nbsp;Code session at your repo root; the prompt tells Claude
-    to discover everything else — stack, paths, gate commands — from the repo
-    during Phase&nbsp;0. Blank fields stay <code>&lt;placeholder&gt;</code>s.
+    thing the repo can't reveal. It assembles a <strong>two-phase</strong>
+    starting prompt to paste into a fresh Claude&nbsp;Code session at your repo
+    root: <strong>Phase&nbsp;A</strong> installs the harness (verified — no
+    hand-written look-alike), configures it from what the repo reveals, and
+    <strong>pauses for your review</strong>; <strong>Phase&nbsp;B</strong> drives
+    the migration slice-by-slice only after your “go”. Blank fields stay
+    <code>&lt;placeholder&gt;</code>s.
   </p>
 
   <div class="panes">
@@ -308,12 +311,15 @@ Full spec: migration/SPEC.md"></textarea>
 
   <p class="note">
     <strong>This generates a prompt, not harness code.</strong> The harness itself
-    ships as a copy-in template — that stays the source of truth. This tool just
-    assembles the right paste-in starting prompt (the same ones documented in
-    <code>README.md</code>) and fills the placeholders you know. Everything the
-    prompt asks Claude to configure — <code>harness.env</code>,
-    <code>gates.sh</code>, <code>CLAUDE.md</code> — still happens against the real
-    template.
+    ships as a copy-in template — that stays the source of truth. This tool
+    assembles the paste-in starting prompt and fills the placeholders you know.
+    The prompt keeps Phase&nbsp;A (install + configure) separate from
+    Phase&nbsp;B (drive) on purpose: once installed, the harness <em>locks</em>
+    its own <code>gates.sh</code>/<code>CLAUDE.md</code>/<code>harness.env</code>
+    against the agent, so configuration must finish — and get your one-glance
+    review — <em>before</em> the governed migration begins. Run it as a single
+    Claude session at a time; a second concurrent session writing the same tree
+    trips the concurrent-writer guard.
   </p>
 </div>
 
@@ -328,68 +334,116 @@ Full spec: migration/SPEC.md"></textarea>
     return v || el.getAttribute("placeholder");
   }
 
+  // Shared blocks — every profile installs the SAME way and hits the SAME
+  // permission/checkpoint/solo-session guidance. Baked in because a bare
+  // "use this harness: <url>" makes an agent improvise a hollow look-alike with
+  // no enforcement, and an unspecified bootstrap parks unattended runs on the
+  // build tool or a root manifest.
+  var INSTALL =
+    "INSTALL (a real install — NOT \"use this harness\", which makes an agent\n" +
+    "improvise a hollow look-alike with no proof, no audit, no frozen guard):\n" +
+    "1. git clone " + URL + " /tmp/awh && bash /tmp/awh/install.sh .\n" +
+    "2. HARD CHECK: confirm the install produced .claude/hooks/ AND the real tools\n" +
+    "   in migration/tools/ (working-tree-hash.sh, record-gates.sh, check-frozen.sh,\n" +
+    "   check-audits.sh, kick-loop.sh). If it did NOT, STOP and tell me — do NOT\n" +
+    "   hand-write substitute gates/hooks; a look-alike without the real\n" +
+    "   enforcement is worse than nothing.\n\n";
+
+  var PERMS =
+    "- PERMISSIONS (this is what silently PARKS an unattended run): apply\n" +
+    "  settings-permissions.patch with <TARGET_TREE> = your new source dir, and\n" +
+    "  ALSO allow-list your build/test tool for DIRECT use (Bash(cargo:*),\n" +
+    "  Bash(npm:*), Bash(go:*), …) and any ROOT manifest outside the target tree\n" +
+    "  (Cargo.toml, package.json, go.mod, pyproject.toml). Run\n" +
+    "  `bash migration/tools/doctor.sh` and clear every warning it prints.\n";
+
+  var CHECKPOINT =
+    "- Verify with doctor.sh (proof/holdout/permissions all clean), commit\n" +
+    "  `chore(harness): bootstrap and configure`, then PAUSE and show me the\n" +
+    "  HARNESS_SCOPE/FROZEN and the EXACT gate commands you wired. Wait for my\n" +
+    "  \"go\": the harness proves the gates that RAN — it does not verify you chose\n" +
+    "  STRONG gates, so this one human glance is the point.\n\n";
+
+  var SOLO =
+    " Run only ONE Claude session against this repo at a time — a second\n" +
+    "concurrent writer mutates the working tree and trips the harness's\n" +
+    "concurrent-writer guard.";
+
   var templates = {
     freeze: function () {
-      return "Install and configure the migration harness from\n" +
-        URL + " for this repository.\n\n" +
-        "Goal: migrate " + val("f-sys") + " to " + val("f-tstack") + ", building the new\n" +
-        "implementation beside the legacy code and keeping the legacy tree as the frozen\n" +
-        "executable oracle.\n\n" +
-        "Discover the rest from the repo during Phase 0 — do not ask:\n" +
-        "- the legacy stack and the legacy source paths (set HARNESS_FROZEN to them);\n" +
-        "- a conventional target path for the new implementation (set HARNESS_SCOPE to\n" +
-        "  \"<target-paths> migration .claude CLAUDE.md AGENTS.md\");\n" +
-        "- the FULL real project checks from the CI config and manifests — wire them into\n" +
-        "  migration/tools/gates.sh and cite the CI file they came from.\n" +
-        "Record each discovered choice in migration/decisions.md as an assumption.\n\n" +
-        "Fill CLAUDE.md, migration/PLAN.md, migration/legacy-runtime.md, and\n" +
-        "migration/parity-matrix.md. Phase 0 should inventory the legacy units, define\n" +
-        "fixture probes, and split the migration into one observable parity row per\n" +
-        "slice. Do not implement migration slices until the harness config and gates are\n" +
-        "working.";
+      return "Migrate " + val("f-sys") + " to " + val("f-tstack") + " using the\n" +
+        "migrate-projects-with-claude harness (" + URL + "), building the new\n" +
+        "implementation beside the legacy code and keeping the legacy tree as the\n" +
+        "frozen executable oracle. Work in two explicit phases; do not conflate them.\n\n" +
+        INSTALL +
+        "PHASE A — BOOTSTRAP (you are the setup pass, before the locked files govern\n" +
+        "you). Discover from the repo, do not ask; record each choice in\n" +
+        "migration/decisions.md as an assumption:\n" +
+        "- HARNESS_FROZEN = the legacy source paths. HARNESS_SCOPE =\n" +
+        "  \"<target-paths> legacy migration .claude CLAUDE.md AGENTS.md\" — INCLUDE the\n" +
+        "  frozen paths in scope so oracle drift invalidates the proof the same turn.\n" +
+        "- gates.sh: PROJECT-GATES = the FULL real checks from the CI config/manifests\n" +
+        "  (cite the CI file); SHIP-BUILD = the production compile.\n" +
+        "- Fill CLAUDE.md, migration/PLAN.md, migration/legacy-runtime.md, and\n" +
+        "  migration/parity-matrix.md; inventory the legacy units and define fixture\n" +
+        "  probes (one observable parity row per slice).\n" +
+        PERMS +
+        "- Record the frozen-oracle baseline (human-only — the agent is blocked from it):\n" +
+        "  bash migration/tools/check-frozen.sh --record && git add migration/frozen-baseline.sha\n" +
+        "- If the oracle is DETERMINISTIC (same input -> same output), plan to enable\n" +
+        "  held-out parity (HARNESS_HOLDOUT=on + wire check-holdout.sh) at the slice\n" +
+        "  that first makes the port's compare step work — it is the strongest gate\n" +
+        "  against a port overfit to the committed fixtures. Record the decision.\n" +
+        CHECKPOINT +
+        "PHASE B — MIGRATE (only after my \"go\"): advance ONE slice per fresh-context\n" +
+        "tick — `bash migration/tools/kick-loop.sh --drive`. One observable parity row\n" +
+        "per slice; no success claim without gates + a fresh-context audit; the frozen\n" +
+        "tree stays read-only." + SOLO;
     },
     inplace: function () {
-      return "Configure the migration harness from\n" +
-        URL + " for an in-place migration.\n\n" +
-        "Goal: transform the existing code from " + val("i-old") + " to\n" +
-        val("i-new") + " without changing observable behavior.\n\n" +
-        "Discover the rest from the repo during Phase 0 — do not ask:\n" +
-        "- the source paths that use " + val("i-old") + " (set\n" +
-        "  HARNESS_SCOPE to \"<source-paths> migration .claude CLAUDE.md AGENTS.md\",\n" +
-        "  PLUS the build/CI scripts, CI configs, and any vendored tool binaries the\n" +
-        "  gates execute — the proof must cover the gates' own inputs);\n" +
-        "  leave HARNESS_FROZEN empty — there is no separate legacy tree to freeze\n" +
-        "  (unless the repo vendors the old dependency's own sources: freeze those);\n" +
-        "- the FULL real project checks from the CI config and manifests — wire them into\n" +
-        "  migration/tools/gates.sh and cite the CI file they came from.\n" +
-        "Record each discovered choice in migration/decisions.md as an assumption.\n\n" +
-        "Before editing each unit, capture its current behavior as fixtures from the base\n" +
-        "commit using probes in migration/fixtures/ or probes/. Tests-first: a unit gets\n" +
-        "a T-row (pin behavior with tests on unmigrated code, snapshot a baseline)\n" +
-        "before its M-row (the edit) — see docs/IN-PLACE-PROFILE.md.\n\n" +
-        "Fill CLAUDE.md and migration/parity-matrix.md so each row names one behavior to\n" +
-        "preserve, the fixture/probe that captures it, and the source paths to edit.\n" +
-        "Work one row at a time; no success claim without gates and fresh-context audit.";
+      return "Migrate this repo IN PLACE from " + val("i-old") + " to " + val("i-new") + "\n" +
+        "using the migrate-projects-with-claude harness (" + URL + "), without\n" +
+        "changing observable behavior. Work in two explicit phases; do not conflate them.\n\n" +
+        INSTALL +
+        "PHASE A — BOOTSTRAP (setup pass, before the locked files govern you). Discover\n" +
+        "from the repo, do not ask; record each choice in migration/decisions.md:\n" +
+        "- Leave HARNESS_FROZEN empty — there is no separate legacy tree (unless the\n" +
+        "  repo vendors " + val("i-old") + "'s own sources: freeze those). HARNESS_SCOPE\n" +
+        "  = \"<source-paths> migration .claude CLAUDE.md AGENTS.md\" PLUS the build/CI\n" +
+        "  scripts and any vendored tool binaries the gates run — the proof must cover\n" +
+        "  the gates' own inputs.\n" +
+        "- gates.sh PROJECT-GATES = the FULL real checks from the CI config/manifests\n" +
+        "  (cite the CI file). Consider HARNESS_ORACLE=\"baselines\" (docs/IN-PLACE-PROFILE.md).\n" +
+        "- Fill CLAUDE.md and migration/parity-matrix.md.\n" +
+        PERMS +
+        CHECKPOINT +
+        "PHASE B — MIGRATE (only after my \"go\"): tests-first — before editing a unit,\n" +
+        "capture its current behavior as fixtures from the base commit; a unit gets a\n" +
+        "T-row (pin behavior on unmigrated code + a baseline snapshot) before its M-row\n" +
+        "(the edit). One row at a time via `bash migration/tools/kick-loop.sh --drive`;\n" +
+        "no success claim without gates + a fresh-context audit." + SOLO;
     },
     feature: function () {
-      return "Use the feature profile of the harness from\n" +
-        URL + " to build " + val("x-feat") + ".\n\n" +
-        "Goal: add " + val("x-feat") + " for " + val("x-users") + ". Correctness is the written spec,\n" +
-        "not legacy parity.\n\n" +
-        "Rename the installed CLAUDE-feature.md (at the repo root after install) to\n" +
-        "CLAUDE.md, and set HARNESS_PROFILE=\"feature\" in migration/harness.env — the\n" +
-        "loop then drives /feature-slice against migration/spec-matrix.md, used as\n" +
-        "the status board. Leave HARNESS_FROZEN empty.\n\n" +
-        "Discover the rest from the repo during Phase 0 — do not ask:\n" +
-        "- the source paths the feature lives in (set HARNESS_SCOPE to\n" +
-        "  \"<source-paths> migration .claude CLAUDE.md AGENTS.md\");\n" +
-        "- the FULL existing checks from the CI config and manifests — wire them plus the\n" +
-        "  new acceptance tests into migration/tools/gates.sh.\n" +
-        "Record each discovered choice in migration/decisions.md as an assumption.\n\n" +
-        "During Phase 0, break the feature into one row per observable acceptance\n" +
-        "criterion. Write or name the acceptance test for each row before implementation.\n" +
-        "Use spec-auditor for fresh-context audits. Keep the existing suite green on\n" +
-        "every slice.";
+      return "Build " + val("x-feat") + " for " + val("x-users") + " using the FEATURE\n" +
+        "profile of the migrate-projects-with-claude harness (" + URL + ") —\n" +
+        "correctness is a written spec, not legacy parity. Work in two explicit phases;\n" +
+        "do not conflate them.\n\n" +
+        INSTALL +
+        "PHASE A — BOOTSTRAP (setup pass, before the locked files govern you). Discover\n" +
+        "from the repo, do not ask; record each choice in migration/decisions.md:\n" +
+        "- Rename the installed CLAUDE-feature.md (repo root) to CLAUDE.md and set\n" +
+        "  HARNESS_PROFILE=\"feature\" in migration/harness.env — the loop then drives\n" +
+        "  /feature-slice against migration/spec-matrix.md. Leave HARNESS_FROZEN empty.\n" +
+        "- HARNESS_SCOPE = \"<source-paths> migration .claude CLAUDE.md AGENTS.md\".\n" +
+        "- gates.sh PROJECT-GATES = the FULL existing checks (cite the CI file) PLUS the\n" +
+        "  new acceptance tests. Break the feature into one row per observable\n" +
+        "  acceptance criterion; write/name the acceptance test for each before it.\n" +
+        PERMS +
+        CHECKPOINT +
+        "PHASE B — MIGRATE (only after my \"go\"): one acceptance-criterion row per\n" +
+        "fresh-context tick via `bash migration/tools/kick-loop.sh --drive`; use\n" +
+        "spec-auditor for fresh-context audits; keep the existing suite green every\n" +
+        "slice; no success claim without gates + audit." + SOLO;
     }
   };
 
@@ -401,8 +455,8 @@ Full spec: migration/SPEC.md"></textarea>
     "is HARNESS_ESCALATE_MODEL in migration/harness.env, which escalates a stuck tick\n" +
     "to a different model). Keep the parity-auditor, spec-auditor and legacy-analyst\n" +
     "subagents pinned to Opus (the model: field in .claude/agents/*.md) so the\n" +
-    "fresh-context audit stays sharp. Run Phase 0 — inventory, slicing, matrix — once\n" +
-    "in a session started with `claude --model opus` before driving.";
+    "fresh-context audit stays sharp. Run Phase A (bootstrap) and the first (B01)\n" +
+    "tick in a session started with `claude --model opus` before driving.";
 
   var out = document.getElementById("out");
 
