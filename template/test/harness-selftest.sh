@@ -188,27 +188,41 @@ chk "docgate: broken anchor fails"           "$(DOCS docgate-fixtures)" 1
 printf '# One\n## Two Words\n### Three\n[a](#two-words)\n' > docgate-fixtures/good.md
 chk "docgate: anchor to later heading passes (multi-heading)" "$(DOCS docgate-fixtures)" 0
 
-# line references: `path:N` / `path:N-M` must point at lines that EXIST (the
-# hallucinated/stale file:line that names a real file but a bad range).
-printf 'a\nb\nc\nd\ne\n' > docgate-fixtures/code.txt      # 5 lines
-printf 'ok `docgate-fixtures/code.txt:3`\n'   > docgate-fixtures/good.md
-chk "docgate: valid single line ref passes"   "$(DOCS docgate-fixtures)" 0
-printf 'ok `docgate-fixtures/code.txt:1-5`\n' > docgate-fixtures/good.md
-chk "docgate: valid line range passes"        "$(DOCS docgate-fixtures)" 0
-printf 'x `docgate-fixtures/code.txt:6`\n'    > docgate-fixtures/good.md
-chk "docgate: single line past EOF fails"     "$(DOCS docgate-fixtures)" 1
-printf 'x `docgate-fixtures/code.txt:2-9`\n'  > docgate-fixtures/good.md
-chk "docgate: range end past EOF fails"        "$(DOCS docgate-fixtures)" 1
-printf 'x `docgate-fixtures/code.txt:4-2`\n'  > docgate-fixtures/good.md
-chk "docgate: inverted range (start>end) fails" "$(DOCS docgate-fixtures)" 1
-printf 'x `docgate-fixtures/code.txt:0`\n'    > docgate-fixtures/good.md
-chk "docgate: line 0 fails"                    "$(DOCS docgate-fixtures)" 1
-printf 'time `12:30`, url `http://h:80/x`\n'  > docgate-fixtures/good.md
-chk "docgate: timestamp/url:port not flagged" "$(DOCS docgate-fixtures)" 0
-printf 'x `docgate-fixtures/missing.txt:9`\n' > docgate-fixtures/good.md
-chk "docgate: unresolved path not range-checked" "$(DOCS docgate-fixtures)" 0
 rm -rf docgate-fixtures
 cd /; rm -rf "$R"
+
+# line references: `path:N` / `path:N-M` must point at lines that EXIST (the
+# hallucinated/stale file:line that names a real file but a bad range). This scan
+# is REPO-WIDE ONLY (a maintainer/CI lint — it must never brick a per-slice gate
+# on a stale ref in a LOCKED doc the agent cannot edit), so it is exercised in a
+# DEDICATED bare repo: a plain mkrepo carries the harness's own migration/.claude
+# docs, whose `probes` references fail the repo-wide path scan (probes/ is not
+# copied) and would mask the line-ref result. Here the only .md is the fixture.
+LR="$(mktemp -d)"; T2="$LR"
+( cd "$LR"; git init -q; git config user.email t@t; git config user.name t
+  mkdir -p migration/tools sub; cp "$H/migration/tools/check-docs.sh" migration/tools/
+  printf "a\nb\nc\nd\ne\n" > sub/code.txt )   # 5 lines
+LREF(){ ( cd "$LR"; git add -A >/dev/null 2>&1; bash migration/tools/check-docs.sh >/dev/null 2>&1; echo $? ); }
+setdoc(){ printf '%s\n' "$1" > "$LR/doc.md"; }
+setdoc 'ok `sub/code.txt:3`';   chk "docgate: valid single line ref passes"   "$(LREF)" 0
+setdoc 'ok `sub/code.txt:1-5`'; chk "docgate: valid line range passes"        "$(LREF)" 0
+setdoc 'x `sub/code.txt:6`';     chk "docgate: single line past EOF fails"     "$(LREF)" 1
+setdoc 'x `sub/code.txt:2-9`';   chk "docgate: range end past EOF fails"        "$(LREF)" 1
+setdoc 'x `sub/code.txt:4-2`';   chk "docgate: inverted range (start>end) fails" "$(LREF)" 1
+setdoc 'x `sub/code.txt:0`';     chk "docgate: line 0 fails"                    "$(LREF)" 1
+setdoc 'time `12:30`, url `http://h:80/x`'; chk "docgate: timestamp/url:port not flagged" "$(LREF)" 0
+setdoc 'x `missing.txt:9`';  chk "docgate: unresolved path not range-checked" "$(LREF)" 0
+# F1 (review): an out-of-repo citation (absolute or ../) must NOT be resolved —
+# its line count would depend on the host FS, making the gate machine-dependent.
+setdoc 'x `/etc/hosts:99999`';       chk "docgate: absolute path not resolved" "$(LREF)" 0
+setdoc 'x `../outside.txt:5`';       chk "docgate: parent-escape path not resolved" "$(LREF)" 0
+# F2 (review): a line number past int64 must be flagged, not crash the arithmetic.
+setdoc 'x `sub/code.txt:99999999999999999999`'; chk "docgate: overflow line number flagged" "$(LREF)" 1
+# F3 (review): SCOPED mode (the per-slice gate form) must NOT range-check, so a
+# stale ref in a locked doc can never brick a slice gate.
+setdoc 'x `sub/code.txt:9`'
+chk "docgate: scoped mode does NOT range-check (no brick)" "$( cd "$LR" && git add -A >/dev/null 2>&1; bash migration/tools/check-docs.sh doc.md >/dev/null 2>&1; echo $? )" 0
+rm -rf "$LR"; T2=""
 
 # ============================================================ config gate (unconfigured harness)
 # gates.sh must refuse to pass while CLAUDE.md still has ship-time placeholders —
@@ -788,6 +802,11 @@ echo 'A' | bash migration/tools/persist-state.sh 'foo/bar' >/dev/null 2>&1
 echo 'B' | bash migration/tools/persist-state.sh 'foo_bar' >/dev/null 2>&1
 chk "persist-state: foo/bar round-trips (no collision)" "$(bash migration/tools/read-state.sh 'foo/bar' 2>/dev/null)" "A"
 chk "persist-state: foo_bar round-trips (no collision)" "$(bash migration/tools/read-state.sh 'foo_bar' 2>/dev/null)" "B"
+# all-dot keys ('.', '..') survive sanitisation and used to mv into the state dir
+# itself, printing a false "persisted" and exiting 0 while storing nothing.
+chk "persist-state: key '.' rejected"  "$(echo x | bash migration/tools/persist-state.sh '.'  >/dev/null 2>&1; echo $?)" 1
+chk "persist-state: key '..' rejected" "$(echo x | bash migration/tools/persist-state.sh '..' >/dev/null 2>&1; echo $?)" 1
+chk "read-state: key '..' rejected"    "$(bash migration/tools/read-state.sh '..' >/dev/null 2>&1; echo $?)" 1
 cd /; rm -rf "$R"
 
 # ============================================================ gates failure feedback
@@ -910,6 +929,19 @@ chk "guard: quoted record-gates spelling blocks"  "$(GUARD 'bash migration/tools
 chk "guard: record-gates direct needs sentinel"   "$(cd "$R" && HARNESS_GATES_ACTIVE= bash migration/tools/record-gates.sh >/dev/null 2>&1; echo $?)" 1
 chk "guard: git config core.hooksPath blocks"     "$(GUARD 'git config core.hooksPath .agent-hooks')" 2
 chk "guard: git config alias shell payload blocks" "$(GUARD 'git config alias.x \"!sh -c payload\"')" 2
+# execution-channel guard bypasses (found reviewing the guard that added it):
+# a quoted config KEY drops the space the alias match keyed on; the inline
+# `git -c KEY=VAL` form needs no `config` subcommand; and a direct .git/config
+# write reaches the same keys and is NOT hashed by check-locked (.git is skipped).
+chk "guard: git config quoted alias key blocks"   "$(GUARD 'git config \"alias.deploy\" \"!sh\"')" 2
+chk "guard: git config core.fsmonitor blocks"     "$(GUARD 'git config core.fsmonitor /tmp/m')" 2
+chk "guard: git -c inline hooksPath blocks"        "$(GUARD 'git -c core.hooksPath=/tmp/e commit -m x')" 2
+chk "guard: git -c inline alias blocks"            "$(GUARD 'git -c alias.z=!sh status')" 2
+chk "guard: benign git -c color.ui allowed"        "$(GUARD 'git -c color.ui=always log')" 0
+chk "guard: direct .git/config write blocks"       "$(GUARD 'echo x >> .git/config')" 2
+chk "guard: tee into .git/config blocks"           "$(GUARD 'echo x | tee .git/config')" 2
+chk "guard: read .git/config allowed"              "$(GUARD 'grep alias .git/config')" 0
+chk "guard: git config user.email allowed"         "$(GUARD 'git config user.email a@b.com')" 0
 chk "guard: redirect write to proof blocks"       "$(GUARD 'echo x > .harness/state/gates-passed.diffsha')" 2
 chk "guard: sed --in-place on proof blocks"       "$(GUARD 'sed --in-place s/a/b/ .harness/state/gates-passed.diffsha')" 2
 chk "guard: cat proof allowed"                    "$(GUARD 'cat .harness/state/gates-passed.diffsha')" 0
@@ -924,6 +956,16 @@ chk "guard: exec locked gates.sh allowed"         "$(GUARD 'bash migration/tools
 chk "guard: read locked gates.sh allowed"         "$(GUARD 'cat migration/tools/gates.sh')" 0
 chk "guard: exec gates.sh redirect elsewhere allowed" "$(GUARD 'bash migration/tools/gates.sh > /tmp/g.log')" 0
 chk "guard: gates.sh piped to tee elsewhere allowed"  "$(GUARD 'bash migration/tools/gates.sh 2>&1 | tee /tmp/g.log')" 0
+
+# CASE-FOLDED spellings (the headline forgery fix, previously untested). On a
+# case-insensitive filesystem (Windows/macOS) an UPPERCASE spelling resolves to
+# the same real file, so a case-sensitive guard was a documented forgery route.
+# Every protective match (proof, record-gates name+glob, locked, frozen) folds
+# case; these pin that so a revert of the -i flags fails the suite.
+chk "guard: UPPER proof write blocks (case-fold)"   "$(GUARD 'echo x > .harness/state/GATES-PASSED.diffsha')" 2
+chk "guard: Mixed record-gates name blocks"         "$(GUARD 'bash migration/tools/Record-Gates.sh')" 2
+chk "guard: UPPER locked gates.sh write blocks"     "$(GUARD 'echo x > MIGRATION/TOOLS/gates.sh')" 2
+chk "guard: UPPER audit record write blocks"        "$(GUARD 'echo x > .HARNESS/state/AUDITS/B01')" 2
 
 # DESTRUCTION of a locked file is a mutation. Blocking only writers left the
 # shortest bypass in the harness open: a Stop hook that is not on disk does not
@@ -1043,6 +1085,13 @@ else
   echo "SKIP: symlink-alias tests (this platform's ln -s does not create real symlinks)"
 fi
 chk "frozen: dot-segment absolute path still blocks"   "$(FROZEN "$R/./legacy/src/A.java")" 2
+# CASE-FOLDED Edit/Write spellings (the headline forgery fix). On a case-folding
+# FS an UPPERCASE path resolves to the same protected file, so a Write to it must
+# still block. The path-SCOPING above stays case-exact (an in-repo/out-of-repo
+# decision); only these protective proof/locked/frozen matches fold case.
+chk "frozen: UPPER proof path Write blocks"    "$(FROZEN "$R/.harness/state/GATES-PASSED.diffsha")" 2
+chk "frozen: UPPER locked path Write blocks"   "$(FROZEN "$R/.claude/hooks/STOP-REQUIRE-GATES.SH")" 2
+chk "frozen: UPPER frozen path Write blocks"   "$(FROZEN "$R/LEGACY/SRC/A.java")" 2
 rm -rf "$R.lnk"    # -r: where ln -s copied instead of linking, this is a directory
 cd /; rm -rf "$R"
 

@@ -78,6 +78,23 @@ if [ -f "$env" ]; then
   for v in HARNESS_SCOPE HARNESS_FROZEN HARNESS_LOCKED; do
     if grep -qE "^${v}=" "$env"; then ok "harness.env defines $v"; else no "harness.env missing $v"; fi
   done
+  # The SHIPPED HARNESS_LOCKED value — not just that the var exists — must lock
+  # the enforcement files whose protection is load-bearing: the hook/tool dirs,
+  # the config, the integrity baselines, .git/hooks, AND the operating contract +
+  # tick prompts (read fresh by every future tick, so an agent that "tidies" them
+  # softens its own rules for all later contexts). A prior review found these
+  # asserted only in a test fixture's env, never in the shipped default — a revert
+  # dropping them would ship an unlocked contract with a fully green suite.
+  locked_line="$(grep -E '^HARNESS_LOCKED=' "$env" | head -n1)"
+  for frag in "migration/tools/" ".claude/hooks/" ".claude/settings.json" \
+              "migration/harness.env" "migration/frozen-baseline.sha" \
+              "migration/locked-baseline.sha" ".git/hooks" \
+              "CLAUDE.md" "migration/SINGLE-TICK-PROMPT.md" "migration/LOOP-PROMPT.md"; do
+    case "$locked_line" in
+      *"$frag"*) ok "harness.env HARNESS_LOCKED covers $frag" ;;
+      *) no "harness.env HARNESS_LOCKED is missing $frag (shipped contract would be unlocked)" ;;
+    esac
+  done
   # Budget/loop/driver config (optional but should be present so every knob
   # documented in CLAUDE.md is configurable in the one config file)
   for v in HARNESS_MAX_CALLS_PER_TICK HARNESS_LOOP_THRESHOLD HARNESS_LOOP_WINDOW HARNESS_MAX_TICKS HARNESS_LOCK_TTL_MIN; do

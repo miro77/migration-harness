@@ -60,13 +60,21 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "kick-loop: not a gi
 
 # Driver knobs come from harness.env like every other HARNESS_* setting, so a
 # value set there actually takes effect. An explicit environment variable on
-# the invocation still wins (scheduler entries may override per-run).
+# the invocation still wins (scheduler entries may override per-run). Capture
+# every driver knob before sourcing so the file default does not clobber an
+# invocation override — the escalation knobs need this too: without the
+# save/restore, `HARNESS_ESCALATE_MODEL=opus kick-loop --drive` was silently
+# reset to the shipped empty default and escalation never ran (found in review).
 _env_max_ticks="${HARNESS_MAX_TICKS:-}"
 _env_lock_ttl="${HARNESS_LOCK_TTL_MIN:-}"
+_env_esc_model="${HARNESS_ESCALATE_MODEL:-}"
+_env_esc_after="${HARNESS_ESCALATE_AFTER:-}"
 # shellcheck source=/dev/null
 [ -f migration/harness.env ] && source migration/harness.env
 HARNESS_MAX_TICKS="${_env_max_ticks:-${HARNESS_MAX_TICKS:-}}"
 HARNESS_LOCK_TTL_MIN="${_env_lock_ttl:-${HARNESS_LOCK_TTL_MIN:-}}"
+HARNESS_ESCALATE_MODEL="${_env_esc_model:-${HARNESS_ESCALATE_MODEL:-}}"
+HARNESS_ESCALATE_AFTER="${_env_esc_after:-${HARNESS_ESCALATE_AFTER:-}}"
 
 prompt=""; check=0; mode="loop"; review=0; review_log_only=0; max_arg=""
 setmode(){
@@ -334,14 +342,43 @@ max_ticks="${max_arg:-${HARNESS_MAX_TICKS:-50}}"
 # Validate like escalate_after does. A non-numeric HARNESS_MAX_TICKS would make
 # `[ "$tick" -ge "$max_ticks" ]` error every iteration under `set +e`: the test
 # is false, the budget never trips, and the drive runs UNBOUNDED. Fall back to 50.
-case "$max_ticks" in ''|*[!0-9]*) echo "kick-loop: HARNESS_MAX_TICKS ('$max_ticks') is not a number — using 50." >&2; max_ticks=50 ;; esac
+# 0 is not a usable budget (the loop would exit before running a single tick and
+# a scheduler would read that as permanent success), so treat it like non-numeric.
+case "$max_ticks" in ''|*[!0-9]*|0) echo "kick-loop: HARNESS_MAX_TICKS ('$max_ticks') is not a number I can use — using 50." >&2; max_ticks=50 ;; esac
 idle=0; tick=0
 
 # Cross-model escalation (opt-in): after this many consecutive no-progress ticks,
 # run the next one on a different model. Off unless HARNESS_ESCALATE_MODEL is set.
 escalate_model="${HARNESS_ESCALATE_MODEL:-}"
 escalate_after="${HARNESS_ESCALATE_AFTER:-1}"
-case "$escalate_after" in ''|*[!0-9]*) escalate_after=1 ;; esac
+# Non-numeric OR 0 -> 1. 0 must not survive: the arming guard below requires
+# escalate_after >= 1, so a literal 0 would arm NOTHING while still being
+# "escalation configured" — which used to disable the idle backstop entirely and
+# burn the whole budget to a false exit 0 (found in review).
+case "$escalate_after" in ''|*[!0-9]*|0) escalate_after=1 ;; esac
+
+# Idle backstop threshold — the drive stops (exit 64) after this many consecutive
+# no-progress ticks. Base is 2. With escalation, extend it by exactly the
+# escalated tick's one shot: arm at escalate_after, the escalated tick runs at
+# escalate_after+1, so stop at escalate_after+1. Computed ONCE and keyed on the
+# idle COUNT (not on escalation actually arming), so no escalation config can
+# remove the backstop — the property the two regressions lacked.
+if [ -n "$escalate_model" ]; then
+  stuck_limit=$(( escalate_after + 1 ))
+  [ "$stuck_limit" -ge 2 ] || stuck_limit=2
+  # If the escalated tick could never run inside the budget (escalate_after+1 >
+  # max_ticks), escalation is unreachable this drive AND across scheduler refires
+  # (idle does not persist between invocations). Do NOT let that unreachable
+  # threshold push the backstop past the budget — that is exactly how
+  # escalate_after >= max_ticks used to burn the whole budget to a false exit 0.
+  # Fall back to the base backstop so a genuinely stuck drive still stops at 64.
+  if [ "$stuck_limit" -gt "$max_ticks" ]; then
+    echo "kick-loop: HARNESS_ESCALATE_AFTER=$escalate_after needs $stuck_limit ticks but the budget is $max_ticks — the escalated tick can never run this drive; using the base idle backstop (2). Lower HARNESS_ESCALATE_AFTER or raise the budget." >&2
+    stuck_limit=2
+  fi
+else
+  stuck_limit=2
+fi
 next_model=""; escalated_ran=0
 while :; do
   if [ "$tick" -ge "$max_ticks" ]; then
@@ -419,19 +456,20 @@ while :; do
       next_model="$escalate_model"
       echo "kick-loop: $idle consecutive tick(s) changed nothing — escalating the next tick to model '$escalate_model'."
     fi
-    # Backstop. WITHOUT escalation: stop after two idle ticks. WITH escalation:
-    # do NOT stop on the raw idle count — that would fire before the escalated
-    # tick ever ran (the bug that made HARNESS_ESCALATE_AFTER>=2 dead code and
-    # printed a false "second on <model>" message). Stop only once the escalated
-    # tick has actually had its one shot and still made no progress: two DIFFERENT
-    # models failing is not a model problem, and a human should look.
-    if [ -z "$escalate_model" ]; then
-      if [ "$idle" -ge 2 ]; then
+    # Backstop. Stop once idle reaches stuck_limit (2 without escalation;
+    # escalate_after+1 with it, so the escalated tick gets its one shot first).
+    # Keyed on the idle COUNT, not on escalated_ran, so it fires even when
+    # escalation never armed — the property the two regressions lacked. When
+    # escalation is configured, report whether the escalated tick actually ran
+    # so the message stays honest either way.
+    if [ "$idle" -ge "$stuck_limit" ]; then
+      if [ -z "$escalate_model" ]; then
         echo "kick-loop: two consecutive ticks changed nothing and no $done_marker was written — stopping this drive; inspect." >&2
-        exit 64
+      elif [ "$escalated_ran" -eq 1 ]; then
+        echo "kick-loop: the escalated tick on '$escalate_model' also changed nothing and no $done_marker was written — two different models made no progress, so this is not a model problem. Stopping; inspect." >&2
+      else
+        echo "kick-loop: $idle consecutive ticks changed nothing and no $done_marker was written (escalation to '$escalate_model' did not run — check HARNESS_ESCALATE_AFTER vs the tick budget) — stopping this drive; inspect." >&2
       fi
-    elif [ "$escalated_ran" -eq 1 ]; then
-      echo "kick-loop: the escalated tick on '$escalate_model' also changed nothing and no $done_marker was written — two different models made no progress, so this is not a model problem. Stopping; inspect." >&2
       exit 64
     fi
   else

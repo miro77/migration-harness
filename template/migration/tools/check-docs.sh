@@ -167,10 +167,17 @@ fi
 # that actually EXIST. The path-existence scan above skips anything with a colon,
 # so a stale/hallucinated range (`engine/lcg.cpp:120-145` naming a real file but a
 # range past its end) sails through today — the file:line drift that Claude Code
-# references invite. Unlike the path scan, this runs in BOTH modes: it fires only
-# when the cited file RESOLVES in this repo, so a consumer doc citing an unshipped
-# path is simply not range-checked (no false positive on installed-but-absent
-# paths — the reason the path scan is repo-wide only).
+# references invite.
+#
+# REPO-WIDE MODE ONLY, like the inline-code path scan above and for the same
+# reasons: (1) the scoped per-slice `gates.sh` call runs on LOCKED docs
+# (CLAUDE.md, the tick prompts) — a stale line-ref there, on a file that
+# legitimately shrank during migration, would brick every future gate on a
+# reference only a human can edit; range-checking there is a footgun. (2) a
+# consumer repo ships only a subset of the harness, so a doc-relative citation
+# may not resolve. This is a maintainer/CI lint; the link/anchor checks above
+# still run in both modes.
+if [ "$#" -eq 0 ]; then
 for f in "${MD[@]:-}"; do
   [ -n "$f" ] && [ -f "$f" ] || continue
   dir=$(dirname "$f")
@@ -182,19 +189,32 @@ for f in "${MD[@]:-}"; do
     printf '%s' "$tok" | grep -qE '^.+/[^:[:space:]]*:[0-9]+(-[0-9]+)?$' || continue
     pathpart=${tok%:*}; spec=${tok##*:}
     start=${spec%%-*}; end=""; case "$spec" in *-*) end=${spec#*-} ;; esac
-    # Resolve pathpart to a single file: root-relative, then relative to the doc,
-    # then a UNIQUE path-segment suffix among tracked files. Unresolved/ambiguous
-    # -> skip (path existence is the scan above's job; a range needs one file).
+    # An absolute path or one with a '..' segment resolves OUTSIDE this repo — its
+    # line count would then depend on whatever sits at that path on the machine
+    # running the gate (green locally, red on CI, or flagged against an unrelated
+    # system file the agent cannot touch). Only resolve in-repo citations.
+    case "$pathpart" in /*|../*|*/../*|*/..) continue ;; esac
+    # Resolve pathpart to a single IN-REPO file: relative to the doc, then a
+    # UNIQUE path-segment suffix among tracked files. No raw `[ -f "$pathpart" ]`
+    # branch — that resolved absolute/out-of-tree paths against the live FS.
+    # Unresolved/ambiguous -> skip (path existence is the scan above's job).
     if [ "$dir" = "." ]; then cand="$pathpart"; else cand="$dir/$pathpart"; fi
     cand="$(norm "$cand")"
     tf=""
-    if [ -f "$pathpart" ]; then tf="$pathpart"
-    elif [ -f "$cand" ]; then tf="$cand"
+    if [ -f "$cand" ]; then tf="$cand"
     else
       matches="$(printf '%s\n' "${TRACKED[@]}" | grep -E "(^|/)$(esc "$pathpart")\$")"
       [ "$(printf '%s\n' "$matches" | grep -c .)" = "1" ] && tf="$matches"
     fi
     [ -n "$tf" ] && [ -f "$tf" ] || continue
+    case "$tf" in /*|../*|*/../*) continue ;; esac   # never step outside the repo
+    # Numbers past ~18 digits overflow bash's 64-bit arithmetic and make the
+    # comparisons below abort with "integer expression expected" (a stderr leak
+    # AND a silent false-negative). A line number that long is never valid.
+    if [ "${#start}" -gt 18 ] || { [ -n "$end" ] && [ "${#end}" -gt 18 ]; }; then
+      note "$f -> \`$tok\`  (line number is implausibly large — stale or malformed reference)"
+      continue
+    fi
     # awk NR, not `wc -l`: wc undercounts a file with no trailing newline by one.
     lc="$(awk 'END{print NR}' "$tf" 2>/dev/null)"; [ -n "$lc" ] || lc=0
     if [ "$start" -lt 1 ]; then
@@ -208,6 +228,7 @@ for f in "${MD[@]:-}"; do
     fi
   done < <(spans_of "$f")
 done
+fi
 
 echo "----------------------------------------"
 if [ "$fails" -eq 0 ]; then echo "doc-gate: all internal Markdown references resolve"; else echo "doc-gate: $fails broken reference(s)"; fi

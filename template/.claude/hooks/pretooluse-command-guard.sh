@@ -84,8 +84,29 @@ fi
 # on the NEXT git invocation, outside every PreToolUse guard — the same
 # out-of-band route that makes .git/hooks/ dangerous. A human sets these outside
 # the agent session if a repo legitimately needs them.
-if printf '%s' "$cmd" | grep -Eqi '\bgit\b[^|;&]*\bconfig\b[^|;&]*(core\.hookspath|core\.fsmonitor|[[:space:]]alias\.[a-z])'; then
+#
+# Run on $cmd_dequoted, not $cmd: `git config "alias.z" '!evil'` quotes the key
+# so a raw match loses the space before `alias`; dequoting restores the
+# effective spelling `git config alias.z ...` (same reason the record-* guards
+# use the dequoted copy). The alias alternative anchors on a word boundary
+# rather than a literal space so a dequoted `config alias.x` still matches.
+if printf '%s' "$cmd_dequoted" | grep -Eqi '\bgit\b[^|;&]*\bconfig\b[^|;&]*(core\.hookspath|core\.fsmonitor|\balias\.[a-z])'; then
   block "Blocked: git config of an execution channel (core.hooksPath / core.fsmonitor / alias.*). These run code on the next git command, invisibly to every PreToolUse guard. A human configures them outside the agent session if genuinely needed."
+fi
+# The SAME channels set via git's inline `-c KEY=VAL` form, which needs no
+# `config` subcommand — `git -c core.hooksPath=/tmp/x commit` runs a hook from
+# an agent-controlled dir for that one (hook-firing) invocation.
+if printf '%s' "$cmd_dequoted" | grep -Eqi '\bgit\b[^|;&]*[[:space:]]-c[[:space:]]+[^|;&]*(core\.hookspath|core\.fsmonitor|alias\.[a-z])'; then
+  block "Blocked: git -c inline config of an execution channel (core.hooksPath / core.fsmonitor / alias.*). It runs code on that git invocation, invisibly to every PreToolUse guard. Drop the -c override."
+fi
+# Direct writes to .git/config reach the same execution-channel keys without ever
+# naming `git config` — and .git/config is NOT hashed by check-locked (nothing
+# under .git can be), so this guard is its ONLY backstop. Block any write/delete
+# operator that also names .git/config. (Reads — `grep alias .git/config` — carry
+# no write operator and pass, as with the gate-proof guard above.)
+if printf '%s' "$cmd" | grep -Eq '\.git/config' \
+   && printf '%s' "$cmd" | grep -Eq '(>|\btee\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|\bln\b|\btruncate\b|\bsed\b[[:space:]]+(-i|--in-place))'; then
+  block "Blocked: writing .git/config directly. It carries the same execution-channel keys (core.hooksPath / core.fsmonitor / alias.*) as 'git config', runs code out-of-band on the next git command, and is not covered by check-locked. A human edits git config outside the agent session."
 fi
 
 # --- Protected paths: locked enforcement (HARNESS_LOCKED) + oracle (HARNESS_FROZEN)

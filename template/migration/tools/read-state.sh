@@ -12,6 +12,10 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "read-state: not a g
 
 key="${1:?usage: read-state.sh <key>}"
 safe=$(printf '%s' "$key" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')
+[ -n "$safe" ] || { echo "read-state: key sanitised to empty — no such state" >&2; exit 1; }
+# Reject all-dot keys for the same reason persist-state does (they never name a
+# real value file), so the round-trip stays symmetric.
+case "$safe" in .|..) echo "read-state: key '$key' is not a usable state name" >&2; exit 1 ;; esac
 # Same disambiguation rule as persist-state.sh, so the round-trip matches.
 [ "$safe" = "$key" ] || safe="${safe}.$(printf '%s' "$key" | cksum | cut -d' ' -f1)"
 file=.harness/state/slice-state/$safe

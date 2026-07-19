@@ -23,6 +23,11 @@ key="${1:?usage: persist-state.sh <key>  (reads value from stdin)}"
 # Sanitise: keep alnum, dash, underscore, dot; replace everything else.
 safe=$(printf '%s' "$key" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')
 [ -n "$safe" ] || { echo "persist-state: key sanitised to empty — use a meaningful key" >&2; exit 1; }
+# A key of all dots ('.', '..') survives sanitisation unchanged and would make
+# "$dir/$safe" the state dir itself or its parent — mv would then succeed with a
+# misleading "persisted" message while writing no retrievable value (read-state
+# finds nothing). Reject it rather than report a false success.
+case "$safe" in .|..) echo "persist-state: key '$key' is not a usable state name — use alphanumerics" >&2; exit 1 ;; esac
 # Disambiguate LOSSY sanitisation: 'foo/bar' and 'foo_bar' both sanitise to
 # 'foo_bar' and would share one file, silently clobbering each other. When the
 # sanitised form differs from the raw key, suffix a short hash of the RAW key so
