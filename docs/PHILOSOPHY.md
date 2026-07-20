@@ -97,6 +97,27 @@ won't silently accept an un-gated or un-bootstrapped state. If you need an
 adversarial guarantee, enforce the same gate suite in CI / branch protection,
 where the agent cannot write the artifact at all.
 
+The other adversarial backstop is one layer *down*. Everything above lives at the
+tool-call boundary (hooks) or the content boundary (the proof hash) — layers a
+subagent, an interpreter, or a creatively-spelled path can step around, which is
+why §4 stops chasing individual bypasses and checks the outcome instead. Below
+all of that is the kernel: every `exec`, file open, and network connect the agent
+or *anything descended from it* performs is a syscall. Kernel-level
+information-flow control — an eBPF policy engine such as
+[ActPlane](https://eunomia.dev/actplane/) — enforces rules there
+(`kill exec "git" "commit" unless after exec "<tests>" exits 0`, or "nothing
+descended from the agent, however many hops, may write outside the scope"),
+scoped by *process lineage* rather than by which tool fired. That retires an
+entire class of bypass at once — the same move as §4's `check-frozen.sh`, one
+level lower — and it is the kernel analogue of "no success claim without
+executable proof": the irreversible action is gated on the proof as a
+precondition, where the agent cannot forge the artifact at all. Two honest
+caveats keep it a *complement*, not a replacement: it is Linux-only (so it lives
+in the CI runner or a Linux sandbox, not on a Windows dev box), and it enforces
+*containment*, never *correctness* — it cannot tell a faithful port from a
+plausible wrong one (§13). It closes escapes; the proof and the audit still carry
+the burden of "is this right?".
+
 ### The controls, in two axes
 
 Borrowing Birgitta Böckeler's framing, every control here is either a **guide**
@@ -106,7 +127,7 @@ check) or **inferential** (a judgement call):
 
 | | Guide (feedforward) | Sensor (feedback) |
 |---|---|---|
-| **Computational** | frozen-oracle + command guards, `HARNESS_LOCKED`, the hard rules | `gates.sh` + content-hash proof + Stop hook, `check-docs.sh`, the config/placeholder gate |
+| **Computational** | frozen-oracle + command guards, `HARNESS_LOCKED`, the hard rules, kernel IFC (§3, adversarial backstop) | `gates.sh` + content-hash proof + Stop hook, `check-docs.sh`, the config/placeholder gate |
 | **Inferential** | the plan and parity matrix that steer each slice | the fresh-context `parity-auditor` |
 
 The load-bearing controls sit in the computational corners — they can't be
@@ -145,6 +166,14 @@ whether the reference still hashes to what it hashed at bootstrap. Edits, added
 files, deletions, mode changes, committed or not, by any route: all drift, all
 fail. One check retires every bypass at once, which is the same reason the Stop
 hook hashes `HARNESS_SCOPE` instead of trying to intercept every write.
+
+The kernel is the one layer below even this. `check-frozen.sh` catches drift
+*after* it happens (a sensor); a kernel information-flow policy scoped by process
+lineage can make the write *impossible* in the first place — feedforward that no
+subagent or interpreter can step around, because it guards the syscall, not the
+tool call. That is the adversarial backstop described in §3's threat-model note;
+it is Linux-only and enforces containment, not correctness, so it complements the
+outcome check rather than replacing it.
 
 Two corollaries the design leans on. The baseline must be **committed** — an
 untracked baseline is authored by whoever wants an answer, so it proves nothing.
