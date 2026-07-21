@@ -9,6 +9,14 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Force Python UTF-8 stdio. On Windows the console codepage is cp1252, so any
+# gate that emits non-ASCII (box-drawing rules, em-dashes — which the harness's
+# OWN diagnostics use) dies with UnicodeEncodeError before the real gate result
+# is visible. Set here (not only in gates.ps1) so the fix covers the direct
+# `bash migration/tools/gates.sh` path too, and default-only so an explicit
+# caller setting still wins. Python 3.15 makes UTF-8 mode the default anyway.
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+
 # shellcheck source=/dev/null
 [ -f migration/harness.env ] && source migration/harness.env
 
@@ -126,8 +134,11 @@ bash migration/tools/check-holdout.sh >&2 \
 #   Node/TypeScript:
 #     npm ci && npm run lint && npm run typecheck && npm test || fail "node gates"
 #
-#   Python:
-#     ruff format --check . && ruff check . && mypy . && pytest -q || fail "py gates"
+#   Python (portable venv interpreter — `.venv/bin/python` does NOT exist on
+#   Windows, where it is `.venv/Scripts/python.exe`; do not hardcode either):
+#     PY=$([ -x .venv/Scripts/python.exe ] && echo .venv/Scripts/python.exe || echo .venv/bin/python)
+#     "$PY" -m ruff format --check . && "$PY" -m ruff check . \
+#         && "$PY" -m mypy . && "$PY" -m pytest -q || fail "py gates"
 #
 #   Go:
 #     test -z "$(gofmt -l .)" && go vet ./... && go test ./... || fail "go gates"
