@@ -23,6 +23,22 @@ self-paced single-session loop in
 | [`migration/`](migration/) | Plan, decisions, tools, config. |
 | [`.claude/`](.claude/) | Commands, agents, enforcement hooks. |
 
+### Authority by concern
+
+These sources govern different questions; they are not one global precedence
+ladder.
+
+| Concern | Authority |
+|---|---|
+| Operating constraints and per-slice done criteria | `CLAUDE.md` |
+| Current slice status and acceptance evidence | `migration/spec-matrix.md` |
+| Phase order and feature strategy | `migration/PLAN.md` |
+| Architecture decisions and recorded assumptions | `migration/decisions.md` |
+| Checks that actually execute | `migration/tools/gates.sh` |
+
+If two sources conflict within the same concern, stop and record the conflict;
+do not silently choose the more convenient interpretation.
+
 ## Target architecture
 
 <Describe where the feature's logic lives: module boundaries, what is

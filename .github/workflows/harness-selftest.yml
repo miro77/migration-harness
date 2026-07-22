@@ -9,11 +9,14 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   selftest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       # run-all.sh covers syntax (bash -n), shellcheck -S error (present on the
       # runner), the runtime selftest, static consistency, and the e2e smoke
@@ -27,12 +30,22 @@ jobs:
   # see it. run-all.ps1 locates Git Bash and runs the full Bash surface
   # through it, so this exercises exactly what a Windows operator would run.
   selftest-windows:
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Run all harness tests via the PowerShell entry point
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\template\test\run-all.ps1"
           exit $LASTEXITCODE
+
+  # Deliberately weaken enforcement in disposable copies and require the named
+  # regression assertion to fail. This is a distribution-maintainer sensor,
+  # not a test installed into consumer repositories.
+  mutation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prove enforcement tests have teeth
+        run: bash test/mutation-test.sh

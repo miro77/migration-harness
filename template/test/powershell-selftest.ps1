@@ -133,6 +133,92 @@ try {
         Check 'install.ps1 refuses to clobber without -Force' ($LASTEXITCODE -eq 1)
         Invoke-Guarded { & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target -Force *> $null }
         Check 'install.ps1 -Force overwrites successfully' ($LASTEXITCODE -eq 0)
+
+        # Forced-upgrade rollback: after a controlled mid-copy failure, the
+        # complete committed target must be byte-for-byte clean again.
+        [IO.File]::WriteAllText((Join-Path $target 'CLAUDE.md'), "LOCAL BEFORE FAILED FORCE`n", [Text.UTF8Encoding]::new($false))
+        & git -C $target add -A
+        & git -C $target commit -qm rollback-baseline
+        $oldFailAfter = $env:HARNESS_INSTALL_FAIL_AFTER
+        try {
+            $env:HARNESS_INSTALL_FAIL_AFTER = '4'
+            $forcedFailureOutput = @(Invoke-Guarded {
+                & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $target -Force 2>&1
+            })
+            Check 'install.ps1 injected forced-upgrade failure is nonzero' ($LASTEXITCODE -ne 0)
+        }
+        finally {
+            $env:HARNESS_INSTALL_FAIL_AFTER = $oldFailAfter
+        }
+        $rollbackStatus = @(& git -C $target status --porcelain --untracked-files=all)
+        Check 'install.ps1 failed forced upgrade restores complete target' ($rollbackStatus.Count -eq 0)
+        Check 'install.ps1 rollback restores overwritten CLAUDE.md' (
+            (Get-Content -LiteralPath (Join-Path $target 'CLAUDE.md') -Raw) -match 'LOCAL BEFORE FAILED FORCE')
+        Check 'install.ps1 successful forced rollback reports no rollback failures' (
+            ($forcedFailureOutput -join "`n") -notmatch 'rollback failures')
+
+        # Fresh-install rollback additionally proves newly created directories
+        # are removed without touching an unrelated project file.
+        $failedTarget = Join-Path $testRoot 'native-install-failure'
+        New-Item -ItemType Directory -Force -Path $failedTarget | Out-Null
+        & git -C $failedTarget init -q
+        & git -C $failedTarget config user.email powershell-selftest@local
+        & git -C $failedTarget config user.name powershell-selftest
+        [IO.File]::WriteAllText((Join-Path $failedTarget 'README-mine.md'), "keep`n", [Text.UTF8Encoding]::new($false))
+        & git -C $failedTarget add -A
+        & git -C $failedTarget commit -qm before-install
+        try {
+            $env:HARNESS_INSTALL_FAIL_AFTER = '40'
+            $freshFailureOutput = @(Invoke-Guarded {
+                & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $failedTarget 2>&1
+            })
+            Check 'install.ps1 injected fresh-install failure is nonzero' ($LASTEXITCODE -ne 0)
+        }
+        finally {
+            $env:HARNESS_INSTALL_FAIL_AFTER = $oldFailAfter
+        }
+        $freshRollbackStatus = @(& git -C $failedTarget status --porcelain --untracked-files=all)
+        Check 'install.ps1 failed fresh install removes all partial output' ($freshRollbackStatus.Count -eq 0)
+        Check 'install.ps1 failed fresh install removes created directories' (
+            -not (Test-Path -LiteralPath (Join-Path $failedTarget '.claude')))
+        Check 'install.ps1 successful fresh rollback reports no rollback failures' (
+            ($freshFailureOutput -join "`n") -notmatch 'rollback failures')
+
+        # Outputs added outside the template manifest still receive the same
+        # preflight type checks and must fail before a transaction starts.
+        $directoryTarget = Join-Path $testRoot 'native-install-directory-output'
+        New-Item -ItemType Directory -Force -Path (Join-Path $directoryTarget '.gitignore') | Out-Null
+        $directoryOutput = @(Invoke-Guarded {
+            & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $directoryTarget 2>&1
+        })
+        Check 'install.ps1 refuses a directory at an output path' ($LASTEXITCODE -eq 1)
+        Check 'install.ps1 explains output-directory refusal' (
+            ($directoryOutput -join "`n") -match 'output path is a directory')
+
+        # Symlink creation requires elevation on some Windows hosts. Exercise
+        # the refusal wherever the host permits creating one (including Linux).
+        $symlinkTarget = Join-Path $testRoot 'native-install-symlink-output'
+        New-Item -ItemType Directory -Force -Path $symlinkTarget | Out-Null
+        $externalFile = Join-Path $testRoot 'external-precious.txt'
+        [IO.File]::WriteAllText($externalFile, "PRECIOUS EXTERNAL CONTENT`n", [Text.UTF8Encoding]::new($false))
+        $symlinkCreated = $false
+        try {
+            New-Item -ItemType SymbolicLink -Path (Join-Path $symlinkTarget 'CLAUDE.md') -Target $externalFile -ErrorAction Stop | Out-Null
+            $symlinkCreated = $true
+        }
+        catch {
+            Write-Host 'SKIP: install.ps1 symlink refusal test (symlink creation unavailable)'
+        }
+        if ($symlinkCreated) {
+            $symlinkOutput = @(Invoke-Guarded {
+                & $engine @engineArgs -File (Join-Path $distribution 'install.ps1') -TargetDir $symlinkTarget -Force 2>&1
+            })
+            Check 'install.ps1 refuses a symlinked output path' ($LASTEXITCODE -eq 1)
+            Check 'install.ps1 explains symlink refusal' (
+                ($symlinkOutput -join "`n") -match 'traverses a symlink or reparse point')
+            Check 'install.ps1 symlink refusal preserves external file' (
+                (Get-Content -LiteralPath $externalFile -Raw) -match 'PRECIOUS EXTERNAL CONTENT')
+        }
     }
 }
 finally {

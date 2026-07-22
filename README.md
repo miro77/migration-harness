@@ -204,6 +204,15 @@ no generator to keep working as Claude Code's hook/settings format evolves.
 Either way the real cost is ~30 min of copy-and-fill per project. See
 [docs/ADAPTING.md](docs/ADAPTING.md).
 
+## Maintainer verification
+
+The repository’s normal self-test lives under `template/test/`. Maintainers
+should also run `bash test/mutation-test.sh` on Linux or in CI. It copies the
+template into a disposable directory, weakens selected enforcement checks, and
+requires the named regression assertion to turn red; it never mutates the
+working tree. The mutation sensor is intentionally separate from the consumer
+test suite because it is a distribution-maintenance check.
+
 ## Provenance
 
 Distilled from a real, large migration. The concrete, project-specific gate

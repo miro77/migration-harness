@@ -33,10 +33,10 @@ else
   ok "install.sh shellcheck skipped (not installed)"
 fi
 
-# T2/T3 are created later for the .gitattributes scenarios; the trap must cover
+# T2-T7 are created later for additional scenarios; the trap must cover
 # them too, or an interrupt between their mktemp and their explicit rm leaks them.
-T="$(mktemp -d)"; T2=""; T3=""
-trap 'cd /; rm -rf "$T" ${T2:+"$T2"} ${T3:+"$T3"}' EXIT
+T="$(mktemp -d)"; T2=""; T3=""; T4=""; T5=""; T6=""; T7=""
+trap 'cd /; rm -rf "$T" ${T2:+"$T2"} ${T3:+"$T3"} ${T4:+"$T4"} ${T5:+"$T5"} ${T6:+"$T6"} ${T7:+"$T7"}' EXIT
 cd "$T"; git init -q; git config core.autocrlf false; git config user.email i@i; git config user.name i
 printf '# my project\n' > README-mine.md   # pre-existing file must survive
 
@@ -66,6 +66,102 @@ grep -qF 'MY LOCAL EDITS' "$T/CLAUDE.md" && ok "install: refusal left local file
 bash "$DIST/install.sh" --force "$T" >/dev/null 2>&1; chk "install: --force overwrites"                 "$?" 0
 grep -qF 'MY LOCAL EDITS' "$T/CLAUDE.md" && no "install: --force restored template CLAUDE.md" "local content kept" "template" || ok "install: --force restored template CLAUDE.md"
 n=$(grep -cxF '.harness/' "$T/.gitignore"); chk "install: .harness/ not duplicated on re-run" "$n" 1
+
+# A failed forced upgrade must restore every overwritten file, not leave a
+# mixed-version harness. Commit the exact pre-run state so git can compare the
+# complete file inventory and contents after the injected mid-copy failure.
+printf 'LOCAL BEFORE FAILED FORCE\n' > "$T/CLAUDE.md"
+git -C "$T" add -A; git -C "$T" commit -qm rollback-baseline
+HARNESS_INSTALL_FAIL_AFTER=4 bash "$DIST/install.sh" --force "$T" >/dev/null 2>&1
+chk "install: injected forced-upgrade failure exits 97" "$?" 97
+status="$(git -C "$T" status --porcelain --untracked-files=all)"
+chk "install: failed forced upgrade restores complete target" "$status" ""
+grep -qF 'LOCAL BEFORE FAILED FORCE' "$T/CLAUDE.md" \
+  && ok "install: rollback restores overwritten CLAUDE.md" \
+  || no "install: rollback restores overwritten CLAUDE.md"
+
+# The same transaction must remove files and directories created during a
+# failed fresh install, while preserving unrelated pre-existing project files.
+T4="$(mktemp -d)"; git -C "$T4" init -q
+git -C "$T4" config user.email i@i; git -C "$T4" config user.name i
+printf 'keep\n' > "$T4/README-mine.md"
+git -C "$T4" add -A; git -C "$T4" commit -qm before-install
+HARNESS_INSTALL_FAIL_AFTER=4 bash "$DIST/install.sh" "$T4" >/dev/null 2>&1
+chk "install: injected fresh-install failure exits 97" "$?" 97
+status="$(git -C "$T4" status --porcelain --untracked-files=all)"
+chk "install: failed fresh install removes all partial output" "$status" ""
+[ ! -e "$T4/.claude" ] && ok "install: failed fresh install removes created directories" \
+  || no "install: failed fresh install removes created directories"
+rm -rf "$T4"
+T4=""
+
+# Refuse output paths that escape through either a leaf or parent symlink. The
+# installer must never overwrite content outside the resolved target root.
+T5="$(mktemp -d)"
+mkdir -p "$T5/external-parent" "$T5/leaf-target" "$T5/parent-target"
+printf 'PRECIOUS EXTERNAL CONTENT\n' > "$T5/external.txt"
+if ln -s "$T5/external.txt" "$T5/leaf-target/CLAUDE.md" 2>/dev/null \
+    && [ -L "$T5/leaf-target/CLAUDE.md" ]; then
+  out="$(bash "$DIST/install.sh" --force "$T5/leaf-target" 2>&1)"
+  chk "install: refuses a symlinked output file" "$?" 1
+  case "$out" in *"traverses a symlink"*) ok "install: explains symlink refusal";; *) no "install: explains symlink refusal";; esac
+  grep -qxF 'PRECIOUS EXTERNAL CONTENT' "$T5/external.txt" \
+    && ok "install: symlink refusal preserves external file" \
+    || no "install: symlink refusal preserves external file"
+
+  ln -s "$T5/external-parent" "$T5/parent-target/.claude"
+  out="$(bash "$DIST/install.sh" "$T5/parent-target" 2>&1)"
+  chk "install: refuses a symlinked output parent" "$?" 1
+  [ -z "$(find "$T5/external-parent" -mindepth 1 -print -quit)" ] \
+    && ok "install: parent-symlink refusal leaves external directory untouched" \
+    || no "install: parent-symlink refusal leaves external directory untouched"
+else
+  echo "SKIP: install symlink refusal tests (symlink creation unavailable)"
+fi
+rm -rf "$T5"
+T5=""
+
+# .gitignore and .gitattributes participate in the transaction even though they
+# are not template files. Reject a directory there cleanly and remove the
+# preflight transaction directory.
+T6="$(mktemp -d)"
+mkdir -p "$T6/target/.gitignore" "$T6/tmp"
+out="$(TMPDIR="$T6/tmp" bash "$DIST/install.sh" "$T6/target" 2>&1)"
+chk "install: refuses a directory at an output path" "$?" 1
+case "$out" in *"output path is a directory"*) ok "install: explains output-directory refusal";; *) no "install: explains output-directory refusal";; esac
+[ -z "$(find "$T6/tmp" -mindepth 1 -print -quit)" ] \
+  && ok "install: cleans transaction after preflight failure" \
+  || no "install: cleans transaction after preflight failure"
+rm -rf "$T6"
+T6=""
+
+# A failed restore must be reported honestly and must retain the backup for
+# manual recovery. The cp shim fails only when rollback reads from backup/.
+T7="$(mktemp -d)"
+mkdir -p "$T7/target" "$T7/tmp" "$T7/bin"
+bash "$DIST/install.sh" "$T7/target" >/dev/null 2>&1
+real_cp="$(command -v cp)"
+cat > "$T7/bin/cp" <<'EOF'
+#!/usr/bin/env bash
+set -u
+source_path=""
+for arg in "$@"; do
+  case "$arg" in -*) ;; *) source_path="$arg"; break;; esac
+done
+case "$source_path" in */harness-install.*/backup/*) exit 88;; esac
+exec "$REAL_CP" "$@"
+EOF
+chmod +x "$T7/bin/cp"
+out="$(PATH="$T7/bin:$PATH" REAL_CP="$real_cp" TMPDIR="$T7/tmp" \
+  HARNESS_INSTALL_FAIL_AFTER=4 bash "$DIST/install.sh" --force "$T7/target" 2>&1)"
+chk "install: preserves injected failure exit after incomplete rollback" "$?" 97
+case "$out" in *"ROLLBACK INCOMPLETE"*) ok "install: reports incomplete rollback";; *) no "install: reports incomplete rollback";; esac
+case "$out" in *"recovery backup retained at"*) ok "install: reports retained recovery backup";; *) no "install: reports retained recovery backup";; esac
+find "$T7/tmp" -maxdepth 1 -type d -name 'harness-install.*' -print -quit | grep -q . \
+  && ok "install: retains transaction after incomplete rollback" \
+  || no "install: retains transaction after incomplete rollback"
+rm -rf "$T7"
+T7=""
 
 # .gitattributes append must not corrupt a pre-existing file with no final newline
 T2="$(mktemp -d)"; git -C "$T2" init -q
